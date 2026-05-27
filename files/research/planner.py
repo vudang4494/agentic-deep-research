@@ -16,6 +16,7 @@ falls back to the hardcoded CHAPTERS list.
 """
 import json
 import re
+from pathlib import Path
 from typing import List, Optional
 
 import httpx
@@ -158,11 +159,18 @@ def plan_outline(topic: str,
                  n_passes: int = DEFAULT_N_PASSES,
                  word_budget: int = DEFAULT_WORD_BUDGET,
                  model: str = DEFAULT_PLANNER_MODEL,
-                 timeout: float = DEFAULT_TIMEOUT) -> Optional[List[dict]]:
+                 timeout: float = DEFAULT_TIMEOUT,
+                 max_attempts: int = 3) -> Optional[List[dict]]:
     """Plan a CHAPTERS outline for the given topic.
 
-    Returns a list compatible with deep_research.CHAPTERS, or None if planning
-    fails (caller should fall back to the hardcoded outline).
+    Up to `max_attempts` retries on JSON parse failure -- the 4B planner model
+    occasionally emits structurally broken JSON (closing brace too early,
+    dangling fields) and temperature 0.4 gives enough variance that a retry
+    usually fixes it. Each failure dumps the raw response to
+    `files/output/planner_failed_<attempt>.txt` for debug.
+
+    Returns a list compatible with deep_research.CHAPTERS, or None if all
+    attempts fail (caller should fall back to the hardcoded outline).
     """
     print(f"[planner] scoping research for topic: {topic!r}", flush=True)
     scope = _scope_topic(topic)
@@ -171,39 +179,70 @@ def plan_outline(topic: str,
     else:
         print(f"[planner] WARN: scoping returned no sources -- proceeding without context", flush=True)
 
-    user_prompt = (
+    base_user_prompt = (
         f"TOPIC: {topic}\n"
         f"REQUIRED OUTLINE SHAPE: {n_chapters} chapters x {n_passes} sections each\n\n"
         f"{scope}\n\n"
         "Return the JSON outline now."
     )
-    payload = {
-        "model": model,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": PLANNER_SYS},
-            {"role": "user",   "content": user_prompt},
-        ],
-        "options": {"temperature": 0.4, "num_predict": 6000, "top_p": 0.9},
-        "think": False,
-    }
-    try:
-        with httpx.Client(timeout=timeout) as c:
-            r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
-            r.raise_for_status()
-            raw = (r.json().get("message") or {}).get("content", "")
-    except Exception as e:
-        print(f"[planner] ERROR: model call failed: {e}", flush=True)
-        return None
 
-    outline = _parse_outline(raw, n_chapters, n_passes, word_budget)
-    if outline is None:
-        print(f"[planner] ERROR: outline parse failed (model returned {len(raw)} chars)", flush=True)
-        return None
+    raw = ""
+    for attempt in range(1, max_attempts + 1):
+        # Each attempt nudges the prompt slightly stricter + bumps temperature
+        # variance just enough to escape a sticky bad parse.
+        if attempt == 1:
+            user_prompt = base_user_prompt
+            temp = 0.4
+        else:
+            user_prompt = (
+                base_user_prompt
+                + "\n\nIMPORTANT: emit STRICT JSON only. Every section object must have ALL "
+                  "three keys (\"p\", \"t\", \"pr\") inside its braces -- no dangling fields. "
+                  "Close every {{ with }} on the same object. No trailing commas. "
+                  "Do not wrap in markdown fences."
+            )
+            temp = 0.4 + (attempt - 1) * 0.15  # 0.55, 0.70
 
-    outline = _self_correct(outline)
-    print(f"[planner] outline OK: {len(outline)} chapters x {len(outline[0]['passes'])} passes", flush=True)
-    return outline
+        payload = {
+            "model": model,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": PLANNER_SYS},
+                {"role": "user",   "content": user_prompt},
+            ],
+            "options": {"temperature": temp, "num_predict": 8000, "top_p": 0.9},
+            "think": False,
+        }
+        try:
+            with httpx.Client(timeout=timeout) as c:
+                r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
+                r.raise_for_status()
+                raw = (r.json().get("message") or {}).get("content", "")
+        except Exception as e:
+            print(f"[planner] ERROR: model call attempt {attempt} failed: {e}", flush=True)
+            continue
+
+        outline = _parse_outline(raw, n_chapters, n_passes, word_budget)
+        if outline is not None:
+            outline = _self_correct(outline)
+            print(f"[planner] outline OK (attempt {attempt}): "
+                  f"{len(outline)} chapters x {len(outline[0]['passes'])} passes",
+                  flush=True)
+            return outline
+
+        # Parse failed -- dump for debug + retry
+        dump_path = Path(__file__).resolve().parent.parent / "output" / f"planner_failed_attempt{attempt}.txt"
+        try:
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            dump_path.write_text(raw)
+        except Exception:
+            pass
+        print(f"[planner] WARN: parse failed on attempt {attempt} "
+              f"(model returned {len(raw)} chars; dumped to {dump_path.name}). "
+              f"{'Retrying...' if attempt < max_attempts else 'Giving up.'}",
+              flush=True)
+
+    return None
 
 
 def _self_correct(outline: List[dict]) -> List[dict]:
