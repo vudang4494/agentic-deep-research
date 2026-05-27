@@ -4,8 +4,65 @@
 topic and produces a book-length technical reference, grounded in retrieved
 sources, with self-critique and re-search loops.
 
-**Status (2026-05-23):** Stages 0 and 1 shipped; Stage 2 is the next concrete piece
-of work.
+**Status (2026-05-27):** Stages 0-3+ shipped; Stage 4 (multi-agent split) in
+progress on the local-only `files2/` fork. Stage 5 (citation-graph walk) planned.
+
+---
+
+## Known weaknesses (2026-05-27 audit)
+
+Four structural gaps verified against the codebase on 2026-05-27. Every Stage 4
+proposal should explicitly close one of these — do **not** paper over with docs.
+
+### W1 -- Model-capability ceiling (4B writers cannot sustain 2000 words)
+- `WORD_BUDGET = 4200` at `files/deep_research.py:101`; every section prompt
+  in `CHAPTERS` asks for "1800-2500 words".
+- gemma3:4b and qwen3.5:4b loop, drop grammar, or forget rules at that length.
+- **Citation gaming is a symptom of prompt overload, not writer malice** —
+  rules + evidence + continuity + concept-avoid list is too heavy for a 4B engine.
+- **Fix path:** let length emerge from evidence count (e.g. 250 words per
+  retained source, capped at 1500). Re-evaluate writer tier only if that
+  still under-fills.
+
+### W2 -- Hardcoded outline contradicts the "Agentic" claim
+- README implies the planner generates outlines per `--topic`. Reality: default
+  `./run.sh` runs the hardcoded 96-section LLM outline at
+  `files2/deep_research.py:104-207` (and `files/deep_research.py`). Planner
+  only fires when `--topic` is passed.
+- `deep_research.py` is a god-class: **1334 lines (files/) / 1421 lines
+  (files2/)** mixing LLM calls, subprocess (pandoc/tectonic), JSON I/O, file
+  existence checks, CLI arg parsing.
+- **Fix path:** split into `planner.py` / `researcher.py` / `writer.py` /
+  `reviewer.py` with explicit handoff dataclasses; remove the hardcoded
+  `CHAPTERS` dict from the default path. This is also the prerequisite for
+  Stage 4 multi-agent parallelism.
+
+### W3 -- Cross-process state.json corruption + watchdog zombies
+- `state.json` is mass-written with `json.dump(state, f, indent=2)` at
+  `files/deep_research.py:755`. Only synchronization is `threading.Lock()` at
+  line 239 — does **not** cross process boundaries.
+- `runner.py` watchdog respawns a fresh subprocess when it suspects a hang.
+  If the original is still alive, two processes hit Ollama (500s) **and**
+  clobber `state.json` (JSON parse failure on next resume).
+- **Fix path:** atomic writes (`tempfile.NamedTemporaryFile` + `os.replace`),
+  cross-process file lock (`fcntl.flock`) or SQLite-WAL state store, and
+  runner must hard-kill the prior PID before respawn (currently does not).
+
+### W4 -- Retrieval fragility ("Deep Research" → "wiki+arxiv summarizer")
+- Tavily quota auto-disables on HTTP 432. Brave free tier returns 402 (dropped
+  from `PROVIDERS_DEFAULT` on 2026-05-25). DDG is HTML-scraped → IP-block risk
+  at 12 × 8 × 2 ≈ 192 requests/run.
+- Without one robust paid provider, the system effectively falls back to
+  arxiv + wiki only.
+- **Fix path:** (a) budget one funded provider (Tavily paid / SerpAPI / Brave
+  with CC), (b) aggressive DDG cache + per-domain politeness window, or
+  (c) accelerate Stage 5 (citation-graph walk) so each round needs fewer
+  fresh queries.
+
+Cross-ref: same gaps recorded in
+`~/.claude/projects/-Users-vudang-PythonLab-AgentDeepLearning/memory/pipeline_critique_2026_05_27.md`.
+Original Stage 0/1 critique (2026-05-23) covered context isolation, format
+hallucination, and crude recovery — most of those have partial fixes shipped.
 
 ---
 
@@ -19,8 +76,8 @@ of work.
 | 2+ | Tavily provider + full-text enrichment + citation verifier + iterative loop | **shipped 2026-05-23** |
 | 3 | Planner agent (outline generated from `--topic`) + outline self-correction | **shipped 2026-05-23** |
 | 3+ | Cross-section concept tracker + outline dedupe directives | **shipped 2026-05-23** |
-| 4 | Multi-agent orchestration (separate Researcher / Writer / Reviewer processes) | planned |
-| 5 | Citation graph following + secondary-hop retrieval | planned |
+| 4 | Multi-agent orchestration (separate Researcher / Writer / Reviewer processes) | in progress (`files2/`, local-only) — blocked on W2 god-class split |
+| 5 | Citation graph following + secondary-hop retrieval | planned (also relieves W4 retrieval fragility) |
 
 ---
 
