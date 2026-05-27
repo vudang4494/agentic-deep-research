@@ -13,10 +13,16 @@ Current implementation:
   - Sanitization strips model-hallucinated H1/H2 / References / Conclusion blocks
   - Auto-resume from checkpoint, macOS notification, PDF render
 """
-import json, os, re, sys, time, signal, argparse, subprocess, threading
+import json, os, re, sys, time, signal, argparse, subprocess, threading, tempfile, atexit, errno
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+
+try:
+    import fcntl  # POSIX only; we degrade to no-op locks on Windows
+    _HAVE_FCNTL = True
+except ImportError:
+    _HAVE_FCNTL = False
 
 # Stage 2 -- agentic research layer. Optional: pipeline degrades to Stage 1 if
 # the package fails to import (e.g. missing httpx).
@@ -743,16 +749,129 @@ def notify(title: str, body: str):
 # State management
 # ============================================================================
 
+# --- W3: process-safe state I/O ---------------------------------------------
+# Why: state.json was written via plain open()+json.dump (non-atomic) and
+# guarded only by threading.Lock (does NOT cross processes). When the runner
+# watchdog respawned a fresh pipeline before the prior one was confirmed dead,
+# two writers raced on state.json -> JSON parse failure on next resume.
+# Fix: atomic write (tempfile + os.replace) + cross-process fcntl.flock on a
+# dedicated .lock sidecar, plus a startup PID lock that refuses double-spawn.
+
+class _FileLock:
+    """Cross-process advisory lock via fcntl.flock on a sidecar .lock file."""
+    def __init__(self, path: Path, exclusive: bool = True):
+        self.path = path
+        self.exclusive = exclusive
+        self._fh = None
+
+    def __enter__(self):
+        if not _HAVE_FCNTL:
+            return self  # no-op on non-POSIX
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        mode = fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
+        fcntl.flock(self._fh.fileno(), mode)
+        return self
+
+    def __exit__(self, *exc):
+        if self._fh is None:
+            return
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
+
+
+def _atomic_write_json(path: Path, obj) -> None:
+    """Atomic JSON write: temp in same dir -> fsync -> os.replace (POSIX atomic)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", dir=str(path.parent),
+        prefix=f".{path.name}.", suffix=".tmp",
+        delete=False, encoding="utf-8",
+    )
+    try:
+        json.dump(obj, tmp, indent=2, ensure_ascii=False)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp.name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def _state_lock_path() -> Path:
+    return STATE_FILE.with_suffix(STATE_FILE.suffix + ".lock")
+
+
 def load_state():
-    if STATE_FILE.exists():
+    if not STATE_FILE.exists():
+        return {"passes": {}, "total_words": 0, "total_tokens": 0, "total_calls": 0}
+    with _FileLock(_state_lock_path(), exclusive=False):
         with open(STATE_FILE) as f:
             return json.load(f)
-    return {"passes": {}, "total_words": 0, "total_tokens": 0, "total_calls": 0}
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    with _FileLock(_state_lock_path(), exclusive=True):
+        _atomic_write_json(STATE_FILE, state)
+
+
+# --- W3: pipeline PID lock --------------------------------------------------
+# Refuses to start a second pipeline against the same output basename. Killed
+# the "watchdog respawn before original is dead" failure mode at the source.
+_PID_LOCK_FH = None
+
+
+def acquire_pipeline_lock() -> None:
+    """Acquire an exclusive PID lock on <state>.pid; exit(2) if another holder exists."""
+    global _PID_LOCK_FH
+    if not _HAVE_FCNTL:
+        return  # best-effort on non-POSIX
+    pid_path = STATE_FILE.with_suffix(STATE_FILE.suffix + ".pid")
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(pid_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if e.errno in (errno.EAGAIN, errno.EACCES):
+            fh.seek(0)
+            existing = fh.read().strip() or "?"
+            fh.close()
+            print(
+                f"[deep_research] REFUSE: another pipeline holds {pid_path} "
+                f"(pid={existing}). Kill it first, or use a different --out-name.",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(2)
+        raise
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    os.fsync(fh.fileno())
+    _PID_LOCK_FH = fh  # keep open for process lifetime; closes on exit
+    atexit.register(_release_pipeline_lock, pid_path)
+
+
+def _release_pipeline_lock(pid_path: Path) -> None:
+    global _PID_LOCK_FH
+    if _PID_LOCK_FH is not None:
+        try:
+            fcntl.flock(_PID_LOCK_FH.fileno(), fcntl.LOCK_UN)
+            _PID_LOCK_FH.close()
+        except Exception:
+            pass
+        _PID_LOCK_FH = None
+    try:
+        pid_path.unlink()
+    except OSError:
+        pass
 
 
 # ============================================================================
@@ -1020,6 +1139,10 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         _rebind_output_paths(out_name)
         print(f"[deep_research] output paths rebound: prefix={out_name!r}", flush=True)
     migrate_legacy_outputs()
+
+    # W3: refuse to run if another pipeline already owns this output basename.
+    # Must happen after _rebind_output_paths so STATE_FILE points at the right file.
+    acquire_pipeline_lock()
 
     # Clear log on fresh start
     if start_ch == 1 and start_pp == 1:

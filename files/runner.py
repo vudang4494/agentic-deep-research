@@ -140,25 +140,51 @@ def is_pipeline_running() -> bool:
     return bool(result.stdout.strip())
 
 
-def kill_pipeline():
+def kill_pipeline() -> bool:
+    """SIGTERM -> wait -> SIGKILL holdouts -> verify gone. Return True only when
+    pgrep confirms no surviving PIDs. The runner's respawn logic must trust this
+    return value before calling start_pipeline (W3: blocks the two-writers race
+    on state.json + Ollama)."""
     result = subprocess.run(
         ["pgrep", "-f", "files/deep_research.py"], capture_output=True, text=True
     )
     pids = [int(l) for l in result.stdout.strip().split("\n") if l.strip()]
+    if not pids:
+        return True
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)
-        except:
+        except ProcessLookupError:
             pass
-    time.sleep(KILL_TIMEOUT)
+    # Graceful wait up to KILL_TIMEOUT, polling every 0.5s.
+    deadline = time.time() + KILL_TIMEOUT
+    while time.time() < deadline and is_pipeline_running():
+        time.sleep(0.5)
+    if not is_pipeline_running():
+        return True
+    # SIGKILL the holdouts.
     for pid in pids:
         try:
             os.kill(pid, 9)
-        except:
+        except ProcessLookupError:
             pass
+    # Confirm dead -- up to 5s for the kernel to reap.
+    deadline = time.time() + 5
+    while time.time() < deadline and is_pipeline_running():
+        time.sleep(0.5)
+    if is_pipeline_running():
+        log("WARN: kill_pipeline could not confirm all PIDs dead; refusing respawn this cycle")
+        return False
+    return True
 
 
-def start_pipeline(start_ch: int = 1, start_pp: int = 1):
+def start_pipeline(start_ch: int = 1, start_pp: int = 1) -> bool:
+    """Refuse to start if a pipeline is already running. Returns True iff Popen ran.
+    Belt-and-suspenders with deep_research.acquire_pipeline_lock() which also
+    refuses double-start at the child side."""
+    if is_pipeline_running():
+        log("REFUSE start_pipeline: an existing files/deep_research.py is already running")
+        return False
     cmd = [
         sys.executable, "-u", str(SCRIPT),
         "--batch", str(BATCH),
@@ -184,6 +210,7 @@ def start_pipeline(start_ch: int = 1, start_pp: int = 1):
         stdout=open(PIPELINE_STDOUT, "a"),
         stderr=subprocess.STDOUT,
     )
+    return True
 
 
 # === PROGRESS ===
@@ -406,8 +433,16 @@ def main():
                 break
             restart_ollama()
             time.sleep(RESTART_DELAY)
+            # W3: pgrep can briefly miss a process that is exiting; re-confirm and
+            # hard-kill any survivor before respawn so we never run two writers.
+            if not kill_pipeline():
+                log("Skipping respawn this cycle -- prior PID still alive")
+                time.sleep(POLL_HEALTH)
+                continue
             resume_ch, resume_pp = get_resume_point()
-            start_pipeline(start_ch=resume_ch, start_pp=resume_pp)
+            if not start_pipeline(start_ch=resume_ch, start_pp=resume_pp):
+                time.sleep(POLL_HEALTH)
+                continue
             time.sleep(10)
 
         # === OLLAMA HEALTH CHECK ===
@@ -438,11 +473,18 @@ def main():
                     log(f"STALLED (no progress for {stall_elapsed/60:.0f}min) -- restarting...")
                     consecutive_stalls += 1
                     last_progress_time = time.time()
-                    kill_pipeline()
+                    # W3: must confirm kill before respawn -- otherwise two writers
+                    # race on state.json + Ollama and we corrupt the resume point.
+                    if not kill_pipeline():
+                        log("Stall recovery aborted -- old PID survived SIGKILL; will retry next cycle")
+                        time.sleep(POLL_HEALTH)
+                        continue
                     time.sleep(RESTART_DELAY)
                     resume_ch, resume_pp = get_resume_point()
                     log(f"Resuming from Ch{resume_ch}, Pass {resume_pp}")
-                    start_pipeline(start_ch=resume_ch, start_pp=resume_pp)
+                    if not start_pipeline(start_ch=resume_ch, start_pp=resume_pp):
+                        time.sleep(POLL_HEALTH)
+                        continue
                     time.sleep(10)
 
         # === PERIODIC PROGRESS LOG ===
