@@ -210,13 +210,16 @@ def _self_correct(outline: List[dict]) -> List[dict]:
     """Cheap deterministic self-correction over a freshly-planned outline:
 
     1. Disambiguate any literally-duplicated section titles.
-    2. Audit for cross-chapter concept overlap; report it to the caller.
+    2. Disambiguate NEAR-duplicates via bge-m3 cosine on titles (catches
+       cases like "Tokenization Strategies" vs "Tokenizer Methods" which
+       the literal-match pass misses but the writer will duplicate).
+    3. Audit for cross-chapter concept overlap; report it to the caller.
 
     Concept-overlap removal is deferred to the runtime dedupe_outline() pass in
     deep_research.run() -- that pass needs runtime access to the full key-term
     list and is idempotent, so we don't duplicate the logic here.
     """
-    # 1. Disambiguate duplicate section titles
+    # 1. Literal-duplicate disambiguation
     seen_titles = {}
     for ch in outline:
         for pp in ch["passes"]:
@@ -227,7 +230,43 @@ def _self_correct(outline: List[dict]) -> List[dict]:
             else:
                 seen_titles[key] = (ch["n"], pp["p"])
 
-    # 2. Audit concept overlap (informational)
+    # 2. Near-duplicate detection via bge-m3 cosine. Annotate the LATER
+    # section with a "DISTINCT FROM Ch X.Y" directive so the writer is
+    # primed to differentiate from the earlier coverage. Cheap (1 batch
+    # embedding call, ~150 titles -> ~2s on M-series).
+    try:
+        from .embeddings import embed, cosine  # local import: planner runs without it on Ollama failures
+        all_pps = [(ch["n"], pp["p"], pp) for ch in outline for pp in ch["passes"]]
+        titles = [pp["t"] for _, _, pp in all_pps]
+        vecs = embed(titles, model="bge-m3:latest") if len(titles) > 1 else []
+        if len(vecs) == len(titles):
+            NEAR_DUP_THRESHOLD = 0.85
+            for i in range(1, len(vecs)):
+                for j in range(i):
+                    sim = cosine(vecs[i], vecs[j])
+                    if sim < NEAR_DUP_THRESHOLD:
+                        continue
+                    later_n, later_p, later = all_pps[i]
+                    earlier_n, earlier_p, earlier = all_pps[j]
+                    directive = (
+                        f"\n\n[OUTLINE-DEDUPE] This section title is near-duplicate "
+                        f"(cosine={sim:.2f}) of Ch{earlier_n}.{earlier_p} "
+                        f"'{earlier['t']}'. Write THIS section from a clearly "
+                        f"distinct angle -- do NOT re-derive the same content. "
+                        f"Reference the earlier section if you must touch the "
+                        f"overlapping concept."
+                    )
+                    if "[OUTLINE-DEDUPE]" not in later["pr"]:
+                        later["pr"] = later["pr"].rstrip() + directive
+                    break  # one near-dup callout per later-section is enough
+            n_near = sum(1 for _, _, pp in all_pps if "[OUTLINE-DEDUPE]" in pp["pr"])
+            if n_near:
+                print(f"[planner] near-duplicate audit: {n_near} sections flagged "
+                      f"with bge-m3 cosine >= {NEAR_DUP_THRESHOLD}", flush=True)
+    except Exception as e:
+        print(f"[planner] near-dup audit skipped ({type(e).__name__}: {e})", flush=True)
+
+    # 3. Audit concept overlap (informational)
     from collections import Counter
     key_terms = ["attention", "embedding", "scaling laws", "fine-tuning", "transformer",
                  "RAG", "quantization", "LoRA", "RLHF", "DPO", "tokeniz"]

@@ -1,0 +1,115 @@
+# Gold-standard eval input for "Large Language Models" topic.
+# Used to benchmark bookv3 (15 chapters x 10 passes = 150 sections, ~410 pages).
+# Hand-curated 2026-05-27 -- expanded canonical set vs transformer.yaml since
+# the LLM topic spans architecture, training, alignment, retrieval, agents.
+
+topic: "Large Language Models"
+difficulty: medium          # broad topic with many subareas
+n_chapters: 15              # informational only -- harness reads from state.json
+n_passes: 10
+
+# === GOLD SOURCES ===========================================================
+
+must_cite:                  # canonical foundations -- any LLM book MUST cite
+  - arxiv: "1706.03762"
+    title: "Attention Is All You Need"
+    aliases: ["Attention Is All You Need", "Vaswani", "Transformer paper"]
+  - arxiv: "1810.04805"
+    title: "BERT: Pre-training of Deep Bidirectional Transformers"
+    aliases: ["BERT", "Devlin", "bidirectional encoder"]
+  - arxiv: "2005.14165"
+    title: "Language Models are Few-Shot Learners (GPT-3)"
+    aliases: ["GPT-3", "few-shot learners", "Brown"]
+  - arxiv: "2203.02155"
+    title: "InstructGPT: Training language models to follow instructions with human feedback"
+    aliases: ["InstructGPT", "RLHF", "human feedback Ouyang"]
+  - arxiv: "2302.13971"
+    title: "LLaMA: Open and Efficient Foundation Language Models"
+    aliases: ["LLaMA", "Touvron"]
+
+should_cite:                # strongly expected; partial credit
+  - arxiv: "2203.15556"
+    title: "Training Compute-Optimal Large Language Models (Chinchilla)"
+    aliases: ["Chinchilla", "compute-optimal", "Hoffmann"]
+  - arxiv: "2001.08361"
+    title: "Scaling Laws for Neural Language Models (Kaplan)"
+    aliases: ["scaling laws", "Kaplan"]
+  - arxiv: "2106.09685"
+    title: "LoRA: Low-Rank Adaptation of Large Language Models"
+    aliases: ["LoRA", "low-rank adaptation", "Hu"]
+  - arxiv: "2201.11903"
+    title: "Chain-of-Thought Prompting Elicits Reasoning in LLMs"
+    aliases: ["chain-of-thought", "CoT prompting", "Wei"]
+  - arxiv: "2005.11401"
+    title: "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks (RAG)"
+    aliases: ["retrieval-augmented generation", "RAG", "Lewis"]
+  - arxiv: "2204.02311"
+    title: "PaLM: Scaling Language Modeling with Pathways"
+    aliases: ["PaLM", "Pathways", "Chowdhery"]
+  - arxiv: "2210.11416"
+    title: "Scaling Instruction-Finetuned Language Models (Flan)"
+    aliases: ["Flan-T5", "Flan", "instruction-finetuned", "Chung"]
+  - arxiv: "2305.18290"
+    title: "Direct Preference Optimization (DPO)"
+    aliases: ["DPO", "direct preference optimization", "Rafailov"]
+  - arxiv: "2104.09864"
+    title: "RoFormer: Enhanced Transformer with Rotary Position Embedding"
+    aliases: ["RoFormer", "rotary position embedding", "RoPE", "Su"]
+  - arxiv: "1907.11692"
+    title: "RoBERTa: A Robustly Optimized BERT Pretraining Approach"
+    aliases: ["RoBERTa", "Liu"]
+
+# === DOMAIN HYGIENE =========================================================
+forbidden_domains:
+  - "techcrunch.com"
+  - "medium.com"
+  - "youtube.com"
+  - "reddit.com"
+  - "twitter.com"
+  - "linkedin.com"
+  - "x.com"
+  - "substack.com"
+
+# === CONTENT COVERAGE =======================================================
+# Concepts that a 410-page LLM book MUST cover somewhere. Substring match.
+expected_subtopics:
+  - "transformer"
+  - "self-attention"
+  - "multi-head attention"
+  - "positional encoding"
+  - "tokenization"
+  - "byte pair encoding"
+  - "pre-training"
+  - "fine-tuning"
+  - "scaling laws"
+  - "chain-of-thought"
+  - "RLHF"
+  - "instruction tuning"
+  - "low-rank adaptation"
+  - "retrieval-augmented"
+  - "in-context learning"
+  - "emergent abilities"
+  - "perplexity"
+  - "decoding"
+  - "beam search"
+  - "temperature"
+
+forbidden_redefines:        # concept-tracker should mark these as defined-once
+  - "self-attention"
+  - "softmax"
+  - "transformer"
+  - "tokenization"
+
+# === PASS/FAIL THRESHOLDS ===================================================
+# Tuned for a planner-generated 150-section book on the LLMs topic.
+thresholds:
+  must_cite_recall_min: 0.80          # 4/5 must-cites found across 150 sections
+  should_cite_recall_min: 0.50        # 5/10 should-cites is a reasonable bar
+  grounding_mean_min: 0.60
+  zero_cite_section_max: 3            # allow up to 3 sections with no citations (out of 150)
+  loop_section_pct_max: 0.05          # <=5% loops
+  research_round_2_rate_max: 0.45     # <=45% re-search rate (Tavily should help vs old 66%)
+  forbidden_domain_hits_max: 5        # tolerance: a few medium.com hits across 150 sec
+  subtopic_coverage_min: 0.80         # 16/20 expected subtopics
+  median_words_min: 700               # W1 should keep most sections well above this
+  median_words_max: 1500               # but not over the WORD_BUDGET ceiling
