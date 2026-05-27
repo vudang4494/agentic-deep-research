@@ -63,7 +63,7 @@ PLANNER_SYS = (
 )
 
 
-def _scope_topic(topic: str, providers=("tavily", "arxiv", "wikipedia")) -> str:
+def _scope_topic(topic: str, providers=("tavily",)) -> str:
     """Run a brief research pass to give the planner real context.
 
     Returns a compact bullet list of titles + 1-line summaries from up to 10
