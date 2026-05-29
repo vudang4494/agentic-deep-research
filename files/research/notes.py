@@ -199,23 +199,29 @@ def clean_citations(content: str, n_sources: int) -> tuple:
         return content, 0
     dropped = 0
 
-    # 1 + 2: numeric [N] handling (out-of-range AND literal "[N]")
+    # 1: N-PREFIXED PLACEHOLDER markers leaked from the SYS template. bookv6
+    #    leaked 77 of these into the rendered book ([N], [N1], [N10], [N3, N7],
+    #    [N2, 5]) because the old regex `\[([Nn]|\d+)\]` only caught the bare
+    #    `[N]` / `[n]` form, not N fused with a digit. N is never a valid source
+    #    index, so any bracket whose tokens are N/n + digits + commas is dropped.
+    #    Constrained to citation-shaped content (N, digits, commas, spaces) so it
+    #    never eats legit bracketed prose like "[Note 3]".
+    _NPLACEHOLDER_RE = _re.compile(r"\[\s*[Nn]\d*(?:\s*,\s*[Nn]?\d+)*\s*\]")
+    cleaned, n_nplace = _NPLACEHOLDER_RE.subn("", content)
+    dropped += n_nplace
+
+    # 2: numeric [N] out-of-range (writer hallucinated index beyond source count)
     def _repl_num(m):
         nonlocal dropped
-        n_text = m.group(1)
-        if n_text.upper() == "N":
-            # literal "[N]" placeholder leaked from SYS prompt
-            dropped += 1
-            return ""
         try:
-            n = int(n_text)
+            n = int(m.group(1))
         except ValueError:
             return m.group(0)
         if 1 <= n <= max(n_sources, 1):
             return m.group(0)
         dropped += 1
         return ""
-    cleaned = _re.sub(r"\[([Nn]|\d+)\]", _repl_num, content)
+    cleaned = _re.sub(r"\[(\d+)\]", _repl_num, cleaned)
 
     # 3: provider-as-author attributions -- "Tavily (2024)", "DDG (2023)", etc.
     _PROVIDER_AUTHOR_RE = _re.compile(

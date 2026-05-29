@@ -1348,10 +1348,18 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 if not content:
                     break
 
-                # Drop any [N>len(ranked)] orphan citations the writer hallucinated.
+                # Drop orphan/out-of-range [N], N-prefixed placeholders ([N1],
+                # [N3,N7]), and provider-as-author attributions. Runs BEFORE
+                # verify so the judge scores the cleaned text.
                 content, n_dropped_cites = _research.notes.clean_citations(content, len(ranked))
                 if n_dropped_cites:
-                    print(f"  [CITE-FIXUP] dropped {n_dropped_cites} orphan [N>{len(ranked)}] markers")
+                    print(f"  [CITE-FIXUP] dropped {n_dropped_cites} bad citation markers/attributions")
+                # Telemetry guard: a citation-shaped [N..] surviving clean_citations
+                # means the cleaner regex has a gap -- surface it without eating
+                # legit math like [N=512]. (citation-shape = N + digits/commas only)
+                _resid = re.findall(r"\[\s*[Nn]\d*(?:\s*,\s*[Nn]?\d+)*\s*\]", content)
+                if _resid:
+                    print(f"  [CITE-GUARD] WARN residual placeholder survived cleaner: {_resid[:3]}")
 
                 t_v = time.time()
                 verify_res = _research.verify.verify_section(
