@@ -1393,9 +1393,14 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         MODEL, batch, "on" if review else "off", research_label,
     ))
     if research_enabled:
-        print("  Research:  query/gen=%s  embed=%s  providers=%s" % (
+        # Rank13: log the EFFECTIVE provider list (after key/session-disable
+        # filtering), not just the configured one, so silent degradation
+        # (e.g. Tavily disabled with no key) is visible at startup.
+        effective = _research.search.available_providers(_research.PROVIDERS_DEFAULT)
+        print("  Research:  query/gen=%s  embed=%s  providers=%s (effective: %s)" % (
             _research.QUERY_GEN_MODEL, _research.EMBED_MODEL,
             ",".join(_research.PROVIDERS_DEFAULT),
+            ",".join(effective) or "NONE",
         ))
     print("=" * 70)
     print()
@@ -1470,6 +1475,7 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 ranked = _research.notes.rank(
                     prefiltered, prompt,
                     top_k=_research.TOP_K_DEFAULT, embed_model=_research.EMBED_MODEL,
+                    precomputed=True,  # Rank13: reuse prefilter's cached relevance
                 )
                 ranked = _research.notes.enrich_top_sources(
                     ranked, top_n=_research.FULL_TEXT_TOP_N, max_words_per=_research.FULL_TEXT_MAX_WORDS,
@@ -1641,8 +1647,11 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         sys.stdout.flush()
 
         # Checkpoint every 2 tasks
+        # Rank13: checkpoint after EVERY section. The LLM call (~2-4min) dwarfs the
+        # 3.8MB state write (<0.1s), and the old every-2 cadence risked losing a
+        # finished section on a crash. Atomic write (W3) makes per-section safe.
+        save_state(state)
         if (i + 1) % 2 == 0:
-            save_state(state)
             elapsed = time.time() - t0
             remaining = total - done - (i + 1)
             est = remaining * elapsed / max(i + 1 - done, 1)

@@ -25,7 +25,9 @@ from . import search, query_gen, notes, embeddings, fetch, verify, planner  # no
 # Tavily ranks recent blogs above 2017-2020 canonical papers. Re-enabling
 # arxiv + wikipedia restores canonical retrieval; ddg stays off as DDG HTML
 # scrape is rate-limit prone and Tavily covers the web surface adequately.
-PROVIDERS_DEFAULT = ("arxiv", "wikipedia", "tavily")
+# ddg is a zero-key HTML fallback so that, when Tavily auto-disables on repeated
+# HTTP 432 mid-run, the web channel doesn't collapse to arxiv+wiki only (Rank13).
+PROVIDERS_DEFAULT = ("arxiv", "wikipedia", "tavily", "ddg")
 TOP_K_DEFAULT = 8
 FULL_TEXT_TOP_N = 2          # fetch full body for the top-N ranked sources
 FULL_TEXT_MAX_WORDS = 350    # cap per source so the prompt doesn't blow up

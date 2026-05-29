@@ -114,7 +114,7 @@ In `files/research/__init__.py`:
 
 | Knob | Default |
 |---|---|
-| `PROVIDERS_DEFAULT` | `("arxiv", "wikipedia", "brave", "ddg", "tavily")` |
+| `PROVIDERS_DEFAULT` | `("arxiv", "wikipedia", "tavily", "ddg")` (brave dropped: free tier 402s. Effective list logged at startup after key/session-disable filtering) |
 | `TOP_K_DEFAULT` | 8 sources per section |
 | `FULL_TEXT_TOP_N` | 2 (top-2 get 350w body, rest keep 80w excerpt) |
 | `QUERY_GEN_MODEL` / `JUDGE_MODEL` | `qwen3.5:4b` |

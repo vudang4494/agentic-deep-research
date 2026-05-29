@@ -125,8 +125,12 @@ def prefilter(sources: List[Source], section_prompt: str,
 
 
 def rank(sources: List[Source], section_prompt: str, top_k: int = 8,
-         embed_model: str = "bge-m3:latest") -> List[Source]:
+         embed_model: str = "bge-m3:latest", precomputed: bool = False) -> List[Source]:
     """Score sources by cosine similarity to the section prompt, return top_k.
+
+    Rank13: when called right after prefilter() (which already embedded every
+    source and cached s.relevance), pass precomputed=True to reuse those scores
+    and skip a redundant embedding call -- roughly halves retrieval-path embeds.
 
     Falls back to keyword overlap if the embedding call fails (no relevance
     scores assigned in that case; sources returned in their original order
@@ -135,10 +139,8 @@ def rank(sources: List[Source], section_prompt: str, top_k: int = 8,
     sources = dedup(sources)
     if not sources:
         return []
-    if len(sources) <= top_k:
-        # Still compute relevance scores even if we'd take them all -- the
-        # writer uses these to know which sources matter most.
-        pass
+    if precomputed and all(getattr(s, "relevance", 0.0) for s in sources):
+        return sorted(sources, key=lambda s: s.relevance, reverse=True)[:top_k]
 
     texts = [section_prompt] + [f"{s.title}. {s.excerpt}" for s in sources]
     vectors = embed(texts, model=embed_model)
