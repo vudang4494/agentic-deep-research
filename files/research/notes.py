@@ -267,11 +267,11 @@ def format_for_prompt(sources: List[Source]) -> str:
         "",
     ]
     for i, s in enumerate(sources, start=1):
-        authors = ", ".join(s.authors[:3]) if s.authors else s.provider.capitalize()
-        if s.authors and len(s.authors) > 3:
-            authors += " et al."
+        # display_author() never exposes a search-tool brand (Tavily/DDG/Brave).
+        authors = s.display_author()
         year = f" ({s.year})" if s.year else ""
-        lines.append(f'[{i}] {authors}{year}. "{s.title}" -- {s.id}  <{s.url}>')
+        attribution = f"{authors}{year}. " if authors else ""
+        lines.append(f'[{i}] {attribution}"{s.title}" -- {s.id}  <{s.url}>')
         if s.excerpt:
             label = "Full text" if len(s.excerpt.split()) > 120 else "Excerpt"
             lines.append(f"    {label}: {s.excerpt}")

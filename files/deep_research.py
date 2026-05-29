@@ -1029,11 +1029,15 @@ def _build_references(state) -> str:
     lines = ["# References", ""]
     for n, key in enumerate(order, start=1):
         s = seen[key]
-        authors = ", ".join(s.get("authors") or []) or s.get("provider", "Source").capitalize()
+        # neutral_author never prints a search-tool brand (Tavily/DDG/Brave) as author.
+        authors = _research.types.neutral_author(
+            s.get("authors"), s.get("provider", ""), s.get("url", "")
+        ) if RESEARCH_AVAILABLE else ", ".join(s.get("authors") or [])
         year = f" ({s['year']})" if s.get("year") else ""
         title = s.get("title", "Untitled")
         url = s.get("url", "")
-        lines.append(f"[{n}] {authors}{year}. _{title}_. <{url}>")
+        sep = ". " if authors else ""
+        lines.append(f"[{n}] {authors}{year}{sep}_{title}_. <{url}>")
         lines.append("")
     return "\n".join(lines) + "\n"
 
