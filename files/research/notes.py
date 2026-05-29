@@ -1,5 +1,6 @@
 """Dedup, rank, and format research sources into an EVIDENCE block for the writer."""
 from typing import List
+from urllib.parse import urlparse
 
 from .embeddings import embed, cosine
 from .fetch import fetch_full_text
@@ -19,30 +20,52 @@ def dedup(sources: List[Source]) -> List[Source]:
     return out
 
 
-# Domains Tavily occasionally returns that are almost never useful for technical
-# research synthesis (corporate marketing, low-quality aggregators, video-only).
-# We don't HARD-block them -- if no other source matches, they can still appear --
-# but we boost their similarity threshold so they have to be highly relevant.
-_NOISY_DOMAINS = (
-    "youtube.com", "vimeo.com", "tiktok.com",
-    "duckduckgo.com",   # caught the "DuckDuckGo's history" false-match in Ch11.4
-    "facebook.com", "twitter.com", "x.com", "linkedin.com",
-    "reddit.com",       # often discussion, low signal-per-token
-    "pinterest.com",
-    # Blog/aggregator platforms -- 2026-05-27 bookv3_pilot eval caught
-    # medium.com x5, cameronrwolfe.substack.com x1, vizuara.substack.com x1
-    # leaking past at cosine 0.45-0.55 threshold. They're substring-matched,
-    # so "*.substack.com" / "*.medium.com" subdomains are covered.
+# Rank-1 fix (bookv6 eval: 82 forbidden-domain hits, all cleared the old soft
+# 0.60 threshold because well-written blogs embed as topically relevant).
+# Two tiers now:
+#   FORBIDDEN -- blog/social/news platforms that are NEVER a primary technical
+#                source. Hard-dropped by host-suffix BEFORE the cosine gate,
+#                regardless of relevance. Mirror this list in the
+#                `forbidden_domains` field of files/eval/topics/*.yaml.
+#   GREY      -- aggregators/tutorials: allowed only if they clear the higher
+#                `noisy_min_relevance` soft threshold.
+_FORBIDDEN_DOMAINS = (
     "medium.com", "substack.com", "techcrunch.com",
-    "towardsdatascience.com",  # also a medium subsite, but bare domain too
+    "youtube.com", "vimeo.com", "tiktok.com",
+    "reddit.com", "facebook.com", "twitter.com", "x.com",
+    "linkedin.com", "pinterest.com", "quora.com",
+)
+_GREY_DOMAINS = (
+    "towardsdatascience.com",
+    "duckduckgo.com",   # caught the "DuckDuckGo's history" false-match in Ch11.4
 )
 
 
-def _is_noisy_domain(url: str) -> bool:
+def _host(url: str) -> str:
+    """Parsed lowercase host without leading www. ('' on parse failure)."""
     if not url:
-        return False
-    u = url.lower()
-    return any(d in u for d in _NOISY_DOMAINS)
+        return ""
+    try:
+        h = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+    return h[4:] if h.startswith("www.") else h
+
+
+def _host_suffix_match(host: str, domains) -> bool:
+    """True if host == d or is a subdomain of d. Suffix-match (not substring)
+    so 'x.com' does NOT spuriously match 'matrix.com', while
+    'cameronrwolfe.substack.com' correctly matches 'substack.com'."""
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def _is_forbidden_domain(url: str) -> bool:
+    return _host_suffix_match(_host(url), _FORBIDDEN_DOMAINS)
+
+
+def _is_noisy_domain(url: str) -> bool:
+    """GREY tier -- subject to the higher soft relevance threshold."""
+    return _host_suffix_match(_host(url), _GREY_DOMAINS)
 
 
 def prefilter(sources: List[Source], section_prompt: str,
@@ -64,6 +87,15 @@ def prefilter(sources: List[Source], section_prompt: str,
     sources = dedup(sources)
     if not sources:
         return []
+    # Tier 1: hard-drop FORBIDDEN domains by host-suffix BEFORE any embedding.
+    # These never qualify as primary sources regardless of cosine relevance.
+    dropped_forbidden = sum(1 for s in sources if _is_forbidden_domain(s.url))
+    sources = [s for s in sources if not _is_forbidden_domain(s.url)]
+    if not sources:
+        if dropped_forbidden:
+            print(f"[research/notes] prefilter hard-dropped {dropped_forbidden} forbidden-domain "
+                  f"(0 sources left)", flush=True)
+        return []
     texts = [section_prompt] + [f"{s.title}. {s.excerpt}" for s in sources]
     vectors = embed(texts, model=embed_model)
     if len(vectors) != len(texts):
@@ -84,9 +116,10 @@ def prefilter(sources: List[Source], section_prompt: str,
                 dropped_offtopic += 1
             continue
         kept.append(s)
-    if dropped_noisy or dropped_offtopic:
-        print(f"[research/notes] prefilter dropped {dropped_offtopic} off-topic + "
-              f"{dropped_noisy} noisy-domain (kept {len(kept)}/{len(sources)})",
+    if dropped_forbidden or dropped_noisy or dropped_offtopic:
+        print(f"[research/notes] prefilter dropped {dropped_forbidden} forbidden + "
+              f"{dropped_offtopic} off-topic + {dropped_noisy} grey-domain "
+              f"(kept {len(kept)}/{len(kept)+dropped_offtopic+dropped_noisy})",
               flush=True)
     return kept
 
