@@ -4,8 +4,56 @@
 topic and produces a book-length technical reference, grounded in retrieved
 sources, with self-critique and re-search loops.
 
-**Status (2026-05-27):** Stages 0-3+ shipped; Stage 4 (multi-agent split) in
-progress on the local-only `files2/` fork. Stage 5 (citation-graph walk) planned.
+**Status (2026-05-29):** Stages 0-3+ shipped. bookv7 fix-batch (12 ranks from the
+multi-agent audit) landed on `main` behind tag `pre-bookv7-fixes`. Stage 4
+(god-class split, see "W2 plan" below) deferred until bookv7 validates the batch.
+Stage 5 (citation-graph walk) unblocked by Rank5 canonical seeds.
+
+---
+
+## bookv7 fix-batch (2026-05-29) — from the multi-agent bookv6 evaluation
+
+12 ranked fixes, each its own commit (rollback granular; full rollback:
+`git reset --hard pre-bookv7-fixes`). Validate on a fresh bookv7 run.
+
+| Rank | Fix | Status |
+|---|---|---|
+| 1 | Hard-block forbidden domains (host-suffix, pre-cosine) | shipped |
+| 2 | clean_citations catches `[N1]/[N3,N7]` placeholders | shipped |
+| 3 | Never expose search-tool brand as citation author | shipped |
+| 4 | Ship best-grounding round (not last) + `quality` flag | shipped |
+| 5 | Canonical-seed (known-item) retrieval — must_cite fix | shipped |
+| 6 | Reserve arxiv/wiki slots in rank() (`primary_floor=3`) | shipped |
+| 7 | Content-similarity dedup gate + repaired concept tracker | shipped |
+| 8 | Factual-attribution check axis (canonical author/year) | shipped |
+| 9 | Strip content-bleed headings + clean continuation tail | shipped |
+| 10 | Display-math repair (split glued `$$`, balance, escape) | partial* |
+| 11 | Anti-boilerplate writer SYS directives | shipped |
+| 13 | Provider reconcile + per-section checkpoint + de-dup embeds | shipped |
+| 12 | **W2 god-class split** | **deferred** (plan below) |
+
+`*` Rank10 fixed the primary tectonic crash class ("Missing $"); residual
+`\symbb` is a pandoc+unicode-math+tectonic config issue, not content. WeasyPrint
+remains the working renderer.
+
+### W2 (Rank 12) god-class split — deferred plan
+
+`deep_research.py` (~1700 lines) split into 4 units behind small interfaces.
+Deferred deliberately: it has **no eval-metric payoff** and must be validated
+against a **pinned known-good eval** — which only exists once bookv7 confirms the
+fix-batch works. Doing the blind refactor in the same batch would risk silently
+breaking ranks 1-11/13 with no fast way to catch it.
+
+6-phase plan (each phase a commit, behavior-preserving, run smoke after each):
+1. `state.py` — load/save_state + FileLock + atomic write + pipeline PID lock (W3)
+2. `ollama_client.py` — OllamaClient
+3. `writer/` — text/sanitize/normalize_math + context + prompts(SYS,W1) + gen()
+4. `reviewer/` — review_section + the Rank8 attribution axis
+5. `render.py` + `assembly.py` — tectonic/weasyprint + assemble/_build_references
+6. `outline_fixture.py` — hardcoded CHAPTERS; update `runner.py` import
+
+After P1-6, `deep_research.py` is a ~250-line orchestrator. `state.json` schema
+MUST stay byte-identical (resume-safety) — assert via dump-compare in P1.
 
 ---
 
