@@ -1684,6 +1684,19 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
             quality = "degraded"
         else:
             quality = "ok"
+        # Rank8: factual-attribution check (orthogonal to citation grounding).
+        # Flags wrong author/year for canonical methods (e.g. Chinchilla credited
+        # to Muennighoff). Advisory -- stored for eval/report, not a hard gate.
+        attribution_flags = []
+        if RESEARCH_AVAILABLE:
+            try:
+                attribution_flags = _research.canonical_seeds.check_attribution(content)
+            except Exception:
+                attribution_flags = []
+        if attribution_flags:
+            print(f"  [FACTCHECK] Ch{ch_n}.{pp_n} {len(attribution_flags)} attribution flag(s): "
+                  + "; ".join(f"{f['concept']}: said {f['found']}, expected {f['expected']}"
+                              for f in attribution_flags))
         state.setdefault("passes", {})[key] = {
             "ch": ch_n,
             "ch_t": ch_t,
@@ -1701,6 +1714,7 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
             "research_rounds": rounds_log,
             "concepts": concepts,
             "quality": quality,
+            "attribution_flags": attribution_flags,
         }
         if quality == "degraded":
             print(f"  [QUALITY] Ch{ch_n}.{pp_n} flagged degraded (grounding={_g}, citations={_ncit})")

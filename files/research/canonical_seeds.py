@@ -83,6 +83,106 @@ SEED_MAP = {
     "beam search": "1409.3215",
 }
 
+# Rank8: canonical attribution facts for the most-cited papers, keyed by the
+# alias the writer is likely to name. Used to flag confidently-wrong author/year
+# attributions that citation-grounding (support-by-snippet) cannot catch -- e.g.
+# bookv6 3.2 misattributed Chinchilla to "Muennighoff et al. (2023)"
+# (real: Hoffmann et al., 2022). {alias_lower: (surname, year)}.
+CANONICAL_FACTS = {
+    "attention is all you need": ("Vaswani", 2017),
+    "transformer architecture": ("Vaswani", 2017),
+    "bert": ("Devlin", 2018),
+    "roberta": ("Liu", 2019),
+    "t5": ("Raffel", 2019),
+    "gpt-3": ("Brown", 2020),
+    "scaling laws": ("Kaplan", 2020),
+    "chinchilla": ("Hoffmann", 2022),
+    "compute-optimal": ("Hoffmann", 2022),
+    "palm": ("Chowdhery", 2022),
+    "llama": ("Touvron", 2023),
+    "instructgpt": ("Ouyang", 2022),
+    "rlhf": ("Ouyang", 2022),
+    "chain-of-thought": ("Wei", 2022),
+    "direct preference optimization": ("Rafailov", 2023),
+    "dpo": ("Rafailov", 2023),
+    "lora": ("Hu", 2021),
+    "low-rank adaptation": ("Hu", 2021),
+    "retrieval-augmented generation": ("Lewis", 2020),
+    "rope": ("Su", 2021),
+    "roformer": ("Su", 2021),
+    "flash attention": ("Dao", 2022),
+    "mamba": ("Gu", 2023),
+    "clip": ("Radford", 2021),
+    "vision transformer": ("Dosovitskiy", 2020),
+    "adam optimizer": ("Kingma", 2014),
+}
+
+_FACT_ALIASES = sorted(CANONICAL_FACTS.keys(), key=len, reverse=True)
+_FACT_RE = {a: re.compile(r"\b" + re.escape(a) + r"\b", re.IGNORECASE) for a in _FACT_ALIASES}
+# An ORIGINATION attribution near the method: "introduced/proposed/developed/...
+# by Surname (YYYY)". Gating on an origination verb avoids flagging a legit
+# ADJACENT cite (e.g. "GPT-3 ... later analyzed by Wei (2022)") as a
+# misattribution -- only claims that the wrong author CREATED the method fire.
+_ORIGIN_ATTRIB_RE = re.compile(
+    r"(?:introduc|propos|develop|pioneer|present|formulat|originat|creat|devis)\w*"
+    r"[^.]{0,40}?\bby\s+([A-Z][a-zA-Z]+)\s*(?:et al\.?,?\s*)?\(?\s*(\d{4})\s*\)?",
+    re.IGNORECASE,
+)
+# Possessive origination: "Muennighoff et al.'s (2023) work on <method>".
+_POSSESSIVE_ATTRIB_RE = re.compile(
+    r"([A-Z][a-zA-Z]+)\s+et al\.?[’']?s?\s*\(?\s*(\d{4})\s*\)?[’']?s?\s+"
+    r"(?:work|paper|study|research|analysis|approach|method)\s+(?:on|in|of)",
+    re.IGNORECASE,
+)
+_ATTRIB_PATTERNS = (_ORIGIN_ATTRIB_RE, _POSSESSIVE_ATTRIB_RE)
+
+
+def check_attribution(content: str) -> list:
+    """Flag confidently-wrong ORIGINATION attributions for canonical methods.
+
+    For each canonical alias present in `content`, look in a window around it for
+    an origination claim ('introduced/proposed by Surname (YYYY)') and compare to
+    the known truth. Advisory, not a hard failure -- grounding measures snippet
+    support, this measures factual truth (e.g. Chinchilla credited to the wrong
+    author). Verb-gated to avoid flagging legit adjacent citations.
+    """
+    if not content:
+        return []
+    flags = []
+    seen = set()
+    for alias in _FACT_ALIASES:
+        truth_surname, truth_year = CANONICAL_FACTS[alias]
+        if (truth_surname, truth_year) in seen:
+            continue
+        m = _FACT_RE[alias].search(content)
+        if not m:
+            continue
+        window = content[max(0, m.start() - 160): m.end() + 160]
+        matched = False
+        for pat in _ATTRIB_PATTERNS:
+            for am in pat.finditer(window):
+                surname, year_s = am.group(1), am.group(2)
+                try:
+                    year = int(year_s)
+                except ValueError:
+                    continue
+                if year < 2010 or year > 2027:
+                    continue
+                surname_wrong = surname.lower() != truth_surname.lower()
+                year_wrong = abs(year - truth_year) > 1
+                if surname_wrong or year_wrong:
+                    flags.append({
+                        "concept": alias, "found": f"{surname} ({year})",
+                        "expected": f"{truth_surname} ({truth_year})",
+                    })
+                    seen.add((truth_surname, truth_year))
+                    matched = True
+                    break
+            if matched:
+                break
+    return flags
+
+
 # Longest-first so "chain-of-thought" is tried before any shorter overlap.
 # Each alias is pre-compiled to a case-insensitive word-boundary regex. The \b
 # boundaries prevent substring false-positives (e.g. "bert" never fires inside
