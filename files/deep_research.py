@@ -711,7 +711,23 @@ def extract_concepts(content: str, limit: int = 15) -> list:
         return []
     # Strip fenced code blocks before extraction so Python comments don't leak in
     code_stripped = re.sub(r"```[\s\S]*?```", "", content)
-    raw = _CONCEPT_HEADER_RE.findall(code_stripped) + _CONCEPT_BOLD_RE.findall(code_stripped)
+    # Rank7: the 4B writer rarely emits H3/H4 or bold, so the header/bold regexes
+    # found nothing in 144/150 bookv6 sections. Add two reliable signals:
+    #   - ALL-CAPS acronyms (DPO, RLHF, RAG, MoE, PPO, ViT, ...) -- 2-6 chars
+    #   - canonical method/model names present in the text (the seed aliases),
+    #     which are exactly the concepts we must stop later sections redefining.
+    acronyms = re.findall(r"\b[A-Z][A-Za-z]?[A-Z]{1,4}\b", code_stripped)
+    canon = []
+    if RESEARCH_AVAILABLE:
+        try:
+            low = code_stripped.lower()
+            canon = [a for a in _research.canonical_seeds.SEED_MAP
+                     if re.search(r"\b" + re.escape(a) + r"\b", low)]
+        except Exception:
+            canon = []
+    raw = (_CONCEPT_HEADER_RE.findall(code_stripped)
+           + _CONCEPT_BOLD_RE.findall(code_stripped)
+           + acronyms + canon)
     seen = {}
     for c in raw:
         c = c.strip().rstrip(":.,").strip()
@@ -1433,6 +1449,7 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
     print()
 
     t0 = time.time()
+    section_vectors = []  # Rank7: (key, embedding) of finalized sections, for the content-dedup gate
     for i, (ch_n, ch_t, pp_n, pp_t, prompt, _legacy_budget) in enumerate(all_tasks):
         # W1: ignore _legacy_budget (the hardcoded 4200 from CHAPTERS). The
         # real target is computed below from evidence count per section.
@@ -1618,6 +1635,44 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                     tokens = stats2.get("tokens", tokens)
                     tps = stats2.get("tps", tps)
                     elapsed_min = stats2.get("elapsed", 0) / 60
+
+        # Rank7: runtime content-similarity gate. Embed this section and compare
+        # to all prior sections; if cosine >= DUP_THRESHOLD it duplicates earlier
+        # material (bookv6 had 65 such pairs, incl a 5-way DPO/RLHF redefinition).
+        # Regenerate ONCE from a distinct angle. The repaired concept tracker +
+        # ALREADY-DEFINED list should make this fire rarely.
+        _DUP_THRESHOLD = 0.85
+        cur_vec = None
+        if RESEARCH_AVAILABLE and content:
+            try:
+                _vecs = _research.embeddings.embed([content[:1500]], model=_research.EMBED_MODEL)
+                cur_vec = _vecs[0] if _vecs else None
+            except Exception:
+                cur_vec = None
+            if cur_vec is not None and section_vectors:
+                _sims = [(_research.embeddings.cosine(cur_vec, pv), pk) for pk, pv in section_vectors]
+                max_sim, dup_key = max(_sims, key=lambda x: x[0])
+                if max_sim >= _DUP_THRESHOLD:
+                    print(f"  [DEDUP] Ch{ch_n}.{pp_n} cosine {max_sim:.2f} vs Ch{dup_key} -- regenerating distinct angle")
+                    avoid = (f"IMPORTANT: Chapter section Ch{dup_key} already covers very similar "
+                             "material. Write THIS section from a clearly DISTINCT angle: do not "
+                             "restate shared definitions -- reference them briefly and focus on what "
+                             "is unique to this section's specific title.\n\n")
+                    content2, stats2, w2 = gen(
+                        client, ch_n, ch_t, pp_n, pp_t, avoid + prompt, target_words,
+                        context_block=context_block, evidence_block=evidence_block,
+                    )
+                    if content2 and w2 >= max(200, int(target_words * 0.4)):
+                        if ranked:
+                            content2, _ = _research.notes.clean_citations(content2, len(ranked))
+                        content, w = content2, w2
+                        try:
+                            _vecs = _research.embeddings.embed([content[:1500]], model=_research.EMBED_MODEL)
+                            cur_vec = _vecs[0] if _vecs else cur_vec
+                        except Exception:
+                            pass
+            if cur_vec is not None:
+                section_vectors.append((f"{ch_n}.{pp_n}", cur_vec))
 
         concepts = extract_concepts(content)
         # Rank4: flag sections that shipped below a hard grounding floor or with
