@@ -1317,6 +1317,7 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
 
         if research_enabled:
             current_hint = None
+            best_round = None  # Rank4: keep the highest-grounding round, not the last
             for round_n in range(1, _research.MAX_RESEARCH_ROUNDS + 1):
                 t_r = time.time()
                 queries = _research.query_gen.queries_for(prompt, ch_t, pp_t, reviewer_hint=current_hint)
@@ -1379,6 +1380,20 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                       f"({verify_res['n_citations']} citations, {len(verify_res['weak_citations'])} weak) "
                       f"in {time.time()-t_v:.1f}s")
 
+                # Rank4: record this round as a candidate. "Better" = has citations
+                # beats zero-citations; tie-break by grounding. So a 0.16 round-1 with
+                # citations is never overwritten by a 0.0 round-2 with none.
+                cand = {
+                    "content": content, "w": w, "stats": stats, "ranked": ranked,
+                    "queries": queries, "verify": verify_res, "evidence": evidence_block,
+                }
+                def _round_score(c):
+                    g = c["verify"].get("grounding") or 0.0
+                    has_cites = (c["verify"].get("n_citations") or 0) > 0
+                    return (1 if has_cites else 0, g)
+                if best_round is None or _round_score(cand) > _round_score(best_round):
+                    best_round = cand
+
                 if verify_res["grounding"] >= _research.MIN_GROUNDING:
                     break
                 if round_n >= _research.MAX_RESEARCH_ROUNDS:
@@ -1388,6 +1403,15 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                     f"Previous draft's citations did not match their sources: {hint_src}. "
                     "Bias query generation toward canonical / primary sources for the specific claims that failed."
                 )
+            # Rank4: ship the BEST round, not whatever the loop happened to end on.
+            if best_round is not None:
+                content = best_round["content"]; w = best_round["w"]
+                stats = best_round["stats"]; ranked = best_round["ranked"]
+                queries = best_round["queries"]; verify_res = best_round["verify"]
+                evidence_block = best_round["evidence"]
+                if len(rounds_log) > 1:
+                    print(f"  [BEST-ROUND] shipped grounding={verify_res['grounding']:.2f} "
+                          f"({verify_res['n_citations']} cites) from the best of {len(rounds_log)} rounds")
         else:
             # No research layer -- straight gen as in legacy mode.
             target_words = compute_target_words(0, has_research=False)
@@ -1438,6 +1462,15 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                     elapsed_min = stats2.get("elapsed", 0) / 60
 
         concepts = extract_concepts(content)
+        # Rank4: flag sections that shipped below a hard grounding floor or with
+        # zero citations despite having evidence, so downstream (eval/report) can
+        # surface them instead of them looking identical to good sections.
+        _g = (verify_res or {}).get("grounding")
+        _ncit = (verify_res or {}).get("n_citations", 0)
+        if sources_json and (_ncit == 0 or (_g is not None and _g < 0.45)):
+            quality = "degraded"
+        else:
+            quality = "ok"
         state.setdefault("passes", {})[key] = {
             "ch": ch_n,
             "ch_t": ch_t,
@@ -1454,7 +1487,10 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
             "verify": verify_res,
             "research_rounds": rounds_log,
             "concepts": concepts,
+            "quality": quality,
         }
+        if quality == "degraded":
+            print(f"  [QUALITY] Ch{ch_n}.{pp_n} flagged degraded (grounding={_g}, citations={_ncit})")
         if concepts:
             print(f"  [CONCEPTS] extracted {len(concepts)}: " + ", ".join(concepts[:6]) +
                   ("..." if len(concepts) > 6 else ""))
