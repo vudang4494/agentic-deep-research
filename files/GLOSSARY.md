@@ -23,10 +23,10 @@
 |------|-------------|
 | **Hard Block** | Khi kiểm tra fail, DỪNG và báo lỗi. Không viết section. Đối lập với Soft Block. |
 | **Soft Block** | Khi kiểm tra fail, vẫn tiếp tục nhưng đánh dấu chất lượng giảm. |
-| **Domain Relevance Gate (P0a)** | Kiểm tra evidence pool đúng domain trước khi viết, qua `notes.check_evidence_domain()` = keyword-overlap + optional gemma judge (KHÔNG phải LLM-judge thuần). Threshold THẬT ≈ 0.40 (`deep_investigate.py:479`), KHÔNG phải 0.60. Accept-topic (writer) = 0.50. Ngưỡng chuẩn: RULES.md |
+| **Domain Relevance Gate (P0a)** | Kiểm tra evidence pool đúng domain trước khi viết, qua `notes.check_evidence_domain()` = keyword-overlap + optional gemma judge (KHÔNG phải LLM-judge thuần). Threshold THẬT ≈ 0.40 (`deep_investigate.py:481`), KHÔNG phải 0.60. Accept-topic (writer) = 0.50. Ngưỡng chuẩn: RULES.md |
 | **Evidence Gate (P0a/B)** | Trước writer: (1) pool không rỗng (else HARD BLOCK); (2) domain-relevance ≥ ev_threshold≈0.40. KHÔNG có gate "đủ terms" riêng. |
-| **Grounding Score** | Điểm hallucination detection (0-1), model HHEM v2. ⚠️ Trên run v36 g=1.0 BÃO HÒA toàn bộ 280 section → non-discriminating; KHÔNG dùng làm tín hiệu chất lượng (xem CLAUDE.md Guardrail 2). |
-| **Topic Relevance Score** | Điểm content đúng chủ đề (0-1). ⚠️ Tính bằng HEURISTIC term-presence + word-overlap (`verify.py:342`, KHÔNG LLM) → quantized {0.5, 0.75, 1.0}, không phải judge ngữ nghĩa. |
+| **Grounding Score** | Điểm hallucination detection (0-1), model HHEM v2. ⚠️ g=1.0 BÃO HÒA toàn bộ 280 section là **trên run v36** (gộp mega-premise); **G3 đã de-saturate** (per-source max HHEM + grounding_mean/unsupported_fraction, `faithfulness.py`) → nay continuous. Vẫn đừng dùng grounding một mình làm tín hiệu chất lượng. |
+| **Topic Relevance Score** | Điểm content đúng chủ đề (0-1). LIVE (v3): **G4 blend** 0.6·`answer_relevance` (gemma LOCAL judge) + 0.4·term-overlap heuristic (`verify.py:399-407`) + StageE floor 0.50. Quantized {0.5,0.75,1.0} chỉ là chữ ký pre-G4 (run v36). |
 | **Citation Count** | Số lần nguồn được trích dẫn trong text. Zero citation = section không có evidence |
 
 ## C. Retrieval (Tìm kiếm nguồn)
@@ -50,7 +50,7 @@
 |------|-------|---------|
 | **Writer** | `batiai/qwen3.6-35b:iq3` | Viết nội dung section |
 | **Query Generator** | QGN | Sinh search queries từ section title |
-| **Judge / Verifier** | | Grounding = HHEM (model). Topic relevance = HEURISTIC (KHÔNG LLM). P0a domain = check_evidence_domain (gemma). |
+| **Judge / Verifier** | | Grounding = HHEM (model). Topic relevance = G4 blend heuristic + `answer_relevance` (gemma LOCAL). Citation integrity = `verify_section` G2 (gemma LOCAL). P0a domain = check_evidence_domain (gemma). |
 | **Discovery Model** | | Phân tích topic, tạo TopicProfile |
 | **Outline Model** | | Tạo outline từ evidence |
 
