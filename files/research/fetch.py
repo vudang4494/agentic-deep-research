@@ -19,7 +19,7 @@ import httpx
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 USER_AGENT = "AgentDeepLearning/0.2 (research layer; local pipeline; contact via repo)"
-TIMEOUT = 30.0
+TIMEOUT = 10.0  # arxiv.org is fast; 30s causes 60s wait (interval+sleep+timeout)
 
 
 def _cache_path(url: str) -> Path:
@@ -46,7 +46,7 @@ def fetch(url: str, accept: Optional[str] = None, force: bool = False) -> Option
         headers["Accept"] = accept
 
     try:
-        with httpx.Client(timeout=TIMEOUT, follow_redirects=True) as c:
+        with httpx.Client(timeout=10.0, follow_redirects=True) as c:
             r = c.get(url, headers=headers)
         record = {
             "url": url,

@@ -19,30 +19,25 @@ OUT_DIR = HERE / "output"
 _OUT_NAME = os.environ.get("DEEP_RESEARCH_OUT_NAME", "").strip()
 
 SCRIPT = HERE / "deep_research.py"
-if _OUT_NAME:
-    STATE_FILE      = OUT_DIR / f"{_OUT_NAME}.state.json"
-    LOG_FILE        = OUT_DIR / f"{_OUT_NAME}.runner.log"
-    PIPELINE_STDOUT = OUT_DIR / f"{_OUT_NAME}.pipeline.stdout.log"
-    REPORT_FILE     = OUT_DIR / f"{_OUT_NAME}.report.json"
-    FINAL_MD        = OUT_DIR / f"{_OUT_NAME}.md"
-    FINAL_HTML      = OUT_DIR / f"{_OUT_NAME}.html"
-    FINAL_PDF       = OUT_DIR / f"{_OUT_NAME}.pdf"
-    CLEAN_MD        = OUT_DIR / f"{_OUT_NAME}.clean.md"
-else:
-    STATE_FILE      = OUT_DIR / "state.json"
-    LOG_FILE        = OUT_DIR / "runner.log"
-    PIPELINE_STDOUT = OUT_DIR / "pipeline.stdout.log"
-    REPORT_FILE     = OUT_DIR / "report.json"
-    FINAL_MD        = OUT_DIR / "book.md"
-    FINAL_HTML      = OUT_DIR / "book.html"
-    FINAL_PDF       = OUT_DIR / "book.pdf"
-    CLEAN_MD        = OUT_DIR / "book.clean.md"
+# Each run lives in output/runs/<name>/ with neutral filenames. Must mirror
+# deep_research._rebind_output_paths. Default (no DEEP_RESEARCH_OUT_NAME) is the
+# run named "book".
+RUN_DIR         = OUT_DIR / "runs" / (_OUT_NAME or "book")
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+STATE_FILE      = RUN_DIR / "state.json"
+LOG_FILE        = RUN_DIR / "runner.log"
+PIPELINE_STDOUT = RUN_DIR / "pipeline.stdout.log"
+REPORT_FILE     = RUN_DIR / "report.json"
+FINAL_MD        = RUN_DIR / "book.md"
+FINAL_HTML      = RUN_DIR / "book.html"
+FINAL_PDF       = RUN_DIR / "book.pdf"
+CLEAN_MD        = RUN_DIR / "book.clean.md"
 
 MAX_HOURS   = 15.0
 BATCH       = 2
 
 OLLAMA_BASE = "http://localhost:11434"
-MODEL       = "gemma3:4b"
+MODEL       = "batiai/qwen3.6-35b:iq3"
 PIPELINE_PATTERN = "files/deep_research.py"  # used for pgrep -- specific enough to avoid false matches
 
 POLL_HEALTH  = 60   # seconds between health checks

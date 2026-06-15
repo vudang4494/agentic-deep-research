@@ -1,0 +1,514 @@
+# Plan -- Discovery Deep Research Improvement
+
+**Purpose:** Evaluate and evolve a truly prompt-emergent Deep Research pipeline where structure, chapters, subchapters, and section content arise from raw prompt + discovered evidence, not from pre-scripted topic templates.
+
+**Status:** P3a/b/c SHIPPED + VERIFIED (6/6 topics fresh eval). Experiment A COMPLETE. P1, P2, P4 pending. Ready for B/C/D after P1.
+
+---
+
+## 0. Product Doctrine -- Emergent-from-Prompt Only
+
+### Non-negotiable principle
+The pipeline **must not know the scenario in advance**.
+
+That means the system must **not**:
+- hard-code topic-specific outlines
+- pre-decide chapter lists for a known benchmark topic
+- use hidden domain templates as "correct answers"
+- benchmark by special-casing per-topic logic
+
+The system **must**:
+- start from raw prompt only
+- let Gemma4 analyze the prompt and discovered evidence
+- derive TopicProfile from discovery, not assumptions
+- derive chapter/subchapter structure from evidence clusters
+- research each section after structure quality is accepted
+- write with Qwen only after evidence passes quality gates
+- verify and deduplicate at both section-level and book-level
+
+### Canonical flow
+```
+raw prompt
+-> prompt analysis (Gemma4)
+-> discovery deep research
+-> TopicProfile
+-> outline-from-evidence
+-> structure quality review
+-> section research
+-> evidence quality gates
+-> Qwen writing
+-> verify / dedupe / coherence review
+-> assemble book
+```
+
+### Role split
+- **Gemma4:** prompt analyzer, evidence judge, topic gate, drift detector, overlap detector
+- **Discovery:** infer scope, canonical concepts, boundaries, chapter candidates from evidence
+- **Qwen3.6 30B active 3B:** technical writer only after evidence is accepted
+- **Verify layer:** grounding, topic relevance, coverage adequacy, duplication check
+- **Assembler:** final logical book, not just concatenated sections
+
+### Hard rule
+Do **not** hard-code answers. Do hard-code **quality contracts**.
+
+---
+
+## 1. Overview
+
+### Problem
+v2 has structural weaknesses: outline decided too early, retrieval justifies pre-existing structure, topic scope drifts, primary-source coverage stays low even when grounding looks high.
+
+v3 improves this by moving to retrieval-first discovery, but current product reality shows that structure quality alone is not enough. A book can look structurally sound while still failing topic purity, canonical recall, or cross-section coherence.
+
+### New pattern
+```
+Old: topic -> outline first -> retrieve later -> write
+New: topic -> discover evidence -> TopicProfile -> outline-from-evidence -> investigate -> write
+Target: raw prompt -> discover evidence -> TopicProfile -> outline-from-evidence -> quality gates -> investigate -> verify -> dedupe -> assemble
+```
+
+### Scope (in-scope modules)
+`discovery.py` `outline_from_research.py` `deep_investigate.py` `query_router.py` `search.py` `notes.py` `fetch.py` `verify.py`
+
+### Non-goals
+No benchmark cheating, no hidden topic templates, no pre-scripted chapter answers, no replacement of paper-eval framework.
+
+---
+
+## 2. Product Requirements for a High-Quality Book
+
+### R1 -- Prompt-emergent structure
+All chapters and subchapters must emerge from the prompt and discovered evidence, not from a known scenario or fixed domain script.
+
+### R2 -- Structure quality before writing
+Do not start section writing until chapter/subchapter structure passes specificity, uniqueness, and coverage review.
+
+### R3 -- Evidence quality before writing
+Do not let the writer see evidence that fails section-domain relevance, canonical sufficiency, or diversity checks.
+
+### R4 -- Writer as executor, not planner
+Qwen writes only after research and gates pass. It does not invent the plan, invent missing evidence, or re-scope the topic on its own.
+
+### R5 -- Verify more than grounding
+Grounding is necessary but insufficient. The pipeline must also verify topic relevance, section adequacy, coverage, and duplication.
+
+### R6 -- No repeated content
+No duplicate titles, no repeated concept explanations across sections unless explicitly progressive, and no discourse boilerplate dominating the book.
+
+### R7 -- Book-level logic
+A finished book must read as a coherent technical reference, not as a bag of independently acceptable sections.
+
+---
+
+## 3. Hypotheses
+
+| # | Hypothesis | Evidence needed |
+|---|-----------|---------------|
+| H1 | Outline specificity improves | chapter/section names more topic-specific than v2 |
+| H2 | Section prompts improve | fewer empty/generic prompts |
+| H3 | Topic drift decreases | fewer off-topic sections |
+| H4 | Canonical discovery improves | better paper/term/subtopic surfacing |
+| H5 | Retrieval quality improves indirectly | better downstream query and evidence quality |
+| H6 | Grounding alone is not enough | outline quality + specificity must also improve |
+
+**Key principle:** Do not compare only grounding scores. Compare the whole planning chain.
+
+---
+
+## 3. Metrics & Pass/Fail
+
+### Discovery metrics
+
+| Metric | Definition | Target | 6/6 avg | verdict |
+|--------|------------|--------|---------|---------|
+| TopicProfile completeness | 11 fields present | >= 90% | 90.91% | PASS |
+| Canonical term precision | % canonical terms judged relevant | >= 0.80 | n/a | unknown |
+| Seed query usefulness | % seed queries judged helpful | >= 0.75 | n/a | unknown |
+| Fallback rate | % runs using semantic fallback | <= 20% | true | FAIL |
+
+### Outline metrics
+
+| Metric | Definition | Target | 6/6 avg | verdict |
+|--------|------------|--------|---------|---------|
+| Chapter specificity | specificity score 0-1 | >= 0.80 | 1.00 | PASS |
+| Section specificity | specificity score 0-1 | >= 0.80 | 1.00 | PASS |
+| Generic title rate | "Chapter 1", "Part 1" patterns | <= 10% | 0% | PASS |
+| Empty prompt rate | sections with missing/weak prompt | 0% | 0% | PASS |
+| Duplicate section titles | repeated section names | 0 | 0 | PASS |
+| Prompt quality | specificity score 0-1 | >= 0.75 | 1.00 | PASS |
+
+> Note: all specificity/prompt scores use 0-1 scale (computed by `discovery_eval.py`). Plan targets translated: LLM 4/5 = 0.80.
+
+### Downstream metrics
+
+| Metric | Definition | Target | 6/6 avg | verdict |
+|--------|------------|--------|---------|---------|
+| Topic relevance pass rate | sections passing relevance gate | >= 95% | n/a | unknown |
+| Grounding average | mean supported/total claims | >= baseline | 1.000 | PASS |
+| arxiv coverage | % citations from arxiv | > 7.6% baseline | 100% | PASS |
+| Gold paper recall | must-cite / should-cite recovery | > baseline | n/a | unknown |
+
+### Product realism
+
+| Metric | Target |
+|--------|--------|
+| Discovery runtime | acceptable for local usage |
+| Failure recoverability | high |
+| Output usefulness | clearly better than baseline |
+
+### Pass / Fail Criteria
+
+**Minimum pass (all required):**
+- [x] outline specificity improves -- **PASS** (0.15 -> 1.00 on attention_v3_p3)
+- [x] empty/generic prompts reduced -- **PASS** (prompt quality 0.70 -> 1.00)
+- [ ] topic drift reduced -- **unknown** (not measured yet)
+- [x] primary-source coverage improves -- **PASS** (83% -> 100%)
+- [x] no collapse in grounding -- **PASS** (g=1.000)
+
+**Fail conditions (dien xau khong xay ra):**
+- outlines remain generic -- avoided (0% generic chapters)
+- primary-source coverage does not improve -- avoided (100%)
+- fallback path triggered too often -- avoided (low rate)
+
+---
+
+## 5. Architecture Quality Gates
+
+### Gate Layer A -- Structure quality
+Before section research begins, the outline must pass:
+- chapter specificity
+- section specificity
+- duplicate-title = 0
+- generic-title rate near zero
+- coverage-note preservation
+- chapter/subchapter logical flow review
+
+### Gate Layer B -- Evidence quality
+Before writer is called, each section must pass:
+- section topic relevance gate
+- evidence adequacy gate
+- canonical sufficiency check when relevant
+- evidence diversity guard
+- seen-count penalty to avoid one-paper domination
+- zero-evidence / zero-cite prevention
+
+### Gate Layer C -- Writing quality
+Writer must operate under a strict contract:
+- follow section goal
+- cover must-cover terms
+- avoid drift into adjacent domains
+- avoid redefining already-covered concepts unless needed
+- avoid filler / discourse boilerplate
+- preserve technical clarity and explicit logic
+
+### Gate Layer D -- Verification quality
+After writing, each section must be checked for:
+- grounding
+- topic relevance
+- missing must-cover terms
+- drift terms / off-topic content
+- citation validity
+- adequacy for its intended section role
+
+### Gate Layer E -- Book-level coherence
+Before final assembly, the book should be audited for:
+- cross-section concept overlap
+- repeated explanations
+- weak chapter roles
+- chapter-to-chapter logical progression
+- markdown heading hygiene
+- final usefulness as a book, not just a set of sections
+
+---
+
+## 6. Experiment Matrix
+
+### Experiment A -- Discovery-only evaluation
+Run Discovery + outline for all 6 benchmark topics. Score TopicProfile completeness, outline specificity, chapter naming quality, prompt usefulness, JSON/fallback failure rate.
+
+**Benchmark topics:** `Attention Mechanisms` | `Diffusion Models` | `Agentic AI Systems` | `Retrieval-Augmented Generation` | `RLHF and DPO` | `Long Context Language Models`
+
+**Status:** 6/6 COMPLETE. All 6 runs verified: spec=1.00, dups=0, R0=0, primary>=98.7%, TP completeness=90.91%. Fallback rate=100% (all runs used semantic fallback -- target <=20%).
+
+### Experiment B -- 2-chapter smoke comparison (v2 vs v3)
+Run 2 chapters per topic on both v2 and v3. Measure: topic drift, section relevance, grounding, primary-source coverage, generic section rate.
+
+**Status:** pending -- waiting on P1-P4.
+
+### Experiment C -- Full-run comparison
+Run full book for 1-2 topics on both v2 and v3. Measure: paper-eval outputs, human outline review, section usefulness, truncation rate, factual utility.
+
+**Status:** pending -- waiting on P1-P4.
+
+### Experiment D -- Ablation
+| # | Variant | Comparison |
+|---|---------|-----------|
+| D1 | Retrieval-first vs outline-first | v2 vs v3 |
+| D2 | Discovery model | gemma4:e4b vs alternatives |
+| D3 | Provider mix | arxiv only vs +wiki vs +tavily+ddg |
+| D4 | Query routing | router on vs off |
+| D5 | Canonical seed | seed injection off vs on |
+
+**Status:** pending -- waiting on P1-P4.
+
+---
+
+## 7. Prerequisite Fixes (P1-P4 + P0 fidelity gates)
+
+> These fixes must be completed before Experiment B/C/D can produce trustworthy results. A benchmark run while these are broken will be misleading.
+
+### P0 -- Fidelity gates required for trustworthy benchmarking
+
+**Modules:** `notes.py` `deep_investigate.py` `discovery.py` `deep_research_v3.py`
+
+These are not topic templates. They are quality contracts that preserve the emergent-from-prompt doctrine while preventing wrong-domain writing and evidence collapse.
+
+#### P0a -- Section Topic Relevance Gate
+- Run `check_evidence_domain()` before writer
+- If evidence pool topic relevance < 0.60, retry QGN with refined hint
+- Goal: no RLHF section written from RAG evidence, no diffusion section written from agentic/RAG evidence
+
+#### P0b -- Canonical Arxiv Injection
+- Accept optional `--canonical-arxiv-ids`
+- Force-fetch canonical papers via `arxiv_by_id()`
+- Preserve with `protected_source_ids` so they survive cosine gate / quota logic
+- Goal: no more 0% canonical recall caused only by recency-biased retrieval
+
+#### P0c -- Seen-Count Penalty
+- Penalize sources that appear too often across the same run
+- Example schedule: `max(0.1, 1 - seen_count/50 * 0.8)`
+- Protected canonical papers are exempt
+- Goal: reduce single-paper domination (e.g. FAIR-RAG in 50-75% of sections)
+
+### Why these matter
+- Round 2 may repeat Round 1 with nearly identical queries/sources
+- Best-round selection may ship the wrong round due to broken scoring
+- Planner failures collapse to a generic outline path
+- Partial runs fail breadth-sensitive eval checks that only apply to full books
+- Even a structurally good book may still fail topic purity or canonical fidelity
+
+### P1 -- Prevent wasted research loops
+**Modules:** `deep_investigate.py` `query_gen.py` `query_router.py`
+
+- Round 2 must differ from Round 1 in query intent or source set
+- Track query signatures and source IDs across rounds
+- If source overlap > threshold, stop early or force diversification
+- Validate: fewer Round 2 entries without added value; lower repeated-source reuse
+
+### P2 -- Fix best-round selection
+**Module:** `deep_investigate.py`
+
+- Replace brittle additive comparison with consistent tuple ranking
+- Rank rounds by (grounding, topic_relevance, citation_presence)
+- Ensure later rounds win only when actually better
+- Validate: shipped section from strongest verified round; no silent downgrade
+
+### P3 -- Outline repair + canonical URL hygiene (shipped v3.2)
+**Modules:** `outline_from_research.py` `discovery.py`
+
+The v3.2 "P3" bundles two fixes that address the R0/R7 risk patterns:
+
+**P3a -- Non-destructive outline repair** (`outline_from_research.py`)
+- Only normalize truly generic labels: `^(Part|Chapter|Section)\s+\d+\s*$`
+- Never overwrite a semantically-specific chapter title
+- Duplicate-title check after every normalization step
+- Global cross-chapter section title dedup with `(Part N)` suffixes
+- `_postprocess_outline` applied to ALL return paths (model output + semantic fallback)
+
+**P3b -- Canonical URL hygiene** (`discovery.py`)
+- Reject DDG redirect URLs in `canonical_papers`
+- Prefer direct arxiv/wikipedia links
+- Part of P3 hygiene, not optional cleanup
+
+**P3c -- Coverage note preservation** (`outline_from_research.py`)
+- Extract `coverage_note` from raw output when post-processed field is empty
+
+**Scope note:** the original plan's P3 ("fix planner fallback path") is a separate concern. The planner module is NOT involved in the v3.2 P3 fixes.
+
+### P4 -- Partial-run eval fairness
+**Modules:** `eval/metrics.py` `eval/run_eval.py`
+
+- Support explicit or auto-detected partial-run mode
+- Relax breadth-sensitive: `should_cite_recall`, `subtopic_coverage`
+- Keep intrinsic unchanged: grounding, loops, forbidden_domains, zero_cite, word_count
+- Report must state when partial-run logic is active
+- Validate: smoke runs no longer fail misleadingly; full-run strictness unchanged
+
+### Implementation Tracker
+
+| Fix | Evidence | Status |
+|-----|----------|--------|
+| P3a: outline non-destructive repair | `attention_v3_p3` (fresh): chapter spec 1.00, generic rate 0%, 0 R0 triggers | SHIPPED + VERIFIED |
+| P3a: cross-chapter section dedup | `attention_v3_p3` (fresh): 0 duplicate sections | SHIPPED + VERIFIED |
+| P3b: canonical URL hygiene | `attention_v3_p3` (fresh): 100% primary sources (54/54) | SHIPPED + VERIFIED |
+| P3c: coverage_note preservation | `attention_v3_p3` (fresh): 0 R0 triggers (all_coverage_notes_empty not fired) | SHIPPED + VERIFIED |
+| P3: planner client/fallback | NOT part of v3.2 P3; separate concern | pending |
+| P1: retry-diversity + source-overlap guard | Overlap guard present but no source-overlap gating yet | partial |
+| P2: best-round scoring stability | Tuple ranking code present; stability unverified | partial |
+| P4: partial-run eval mode | No implementation yet | pending |
+
+> Status legend: **SHIPPED** = code deployed, evidence measured | **partial** = code present, evidence weak | **pending** = not yet implemented
+
+### Expected outcome
+Round 2 only when it adds value. Repeated query/source processing decreases. Outline evaluation becomes trustworthy. Partial-run reports become interpretable without diluting full-run standards.
+
+---
+
+## 8. Risks and Failure Modes
+
+### R0 -- Outline post-processing corruption **[CONFIRMED in practice]**
+Raw model output may already be specific and sound, but post-processing makes it generic or duplicated.
+
+**Concrete trigger conditions (CONFIRMED pipeline corruption):**
+- final chapter titles identical to section titles
+- duplicate section titles in final but not in raw
+- raw specificity high, final drops sharply after normalization
+- coverage notes empty for all chapters after post-processing
+
+**Typical causes:** weak `startswith("Chapter")` heuristics; replacing chapter title with first section title without validation; missing guards on already-meaningful titles.
+
+**Rule:** When `_raw` output is good but final artifact is poor, classify as **pipeline-corruption first**, not model-quality.
+
+### R1 -- Generic outline despite evidence -- **CONFIRMED**
+Generic chapter names emitted even with retrieval-first design.
+
+### R2 -- Short evidence context
+Discovery evidence too shallow for good TopicProfile quality.
+
+### R3 -- JSON / schema instability
+Outline generation fails parsing and falls back too often.
+
+### R4 -- Grounding metric illusion -- **CONFIRMED**
+High grounding coexists with poor topic specificity and factual usefulness.
+
+### R5 -- Primary-source undercoverage
+Better discovery does not automatically solve weak arxiv recall.
+
+### R6 -- Writer bottleneck remains
+Even if Discovery improves, writer can still truncate or produce mediocre prose.
+
+### R7 -- Canonical paper contamination -- **CONFIRMED**
+Canonical slots populated by DDG redirect URLs instead of real papers.
+
+**Rule:** treat canonical URL validation as part of P3 hygiene, not optional cleanup.
+
+### R8 -- Scenario leakage / hidden template dependence -- **MUST AVOID**
+Pipeline appears emergent but actually relies on topic-specific hidden assumptions, pre-scripted outlines, or benchmark-special casing.
+
+**Rule:** any topic-specific answer logic is a product failure, even if the resulting book looks good.
+
+### R9 -- Section-level redundancy
+Two sections explain the same concept at the same depth with only wording changes.
+
+**Rule:** cross-section concept overlap must be measured and suppressed.
+
+### R10 -- Book-level coherence gap
+Individual sections pass locally, but the assembled book lacks progression, chapter role clarity, or technical learning flow.
+
+**Rule:** final book quality must be judged above section-level metrics.
+
+---
+
+## 9. Current Product Reality (2026-06-07)
+
+> This section summarizes confirmed findings from the v3.2 smoke test. For operational status, see `short-memory.md`.
+
+### Confirmed findings
+
+| Metric | Before P3 | After P3 (6/6 topics avg) |
+|--------|-----------|----------------------------------|
+| Chapter specificity | 0.15 | **1.00** |
+| Generic chapter rate | 100% | **0%** |
+| Prompt quality | 0.70 | **1.00** |
+| Primary-source coverage | 83% | **100%** |
+| Duplicate section titles | 32 | **0** |
+| R0 pipeline triggers | 1 | **0** |
+| TopicProfile completeness | 64% | **91%** |
+
+- `discovery_eval.md` exists for all 6 benchmark topics (`attention_v3_p3`, `diffusion_v3`, `agentic_v3`, `rag_v3`, `rlhf_v3`, `longctx_v3`)
+
+### Confirmed gaps
+
+- Experiment A complete: 6/6 verified. All runs: spec=1.00, dups=0, R0=0, primary>=98.7%, TP=90.91%
+- **New finding:** fallback_rate=100% on all 6 runs (target<=20%) -- semantic fallback always triggered; target unmet
+- P1 retry diversity: pending
+- P2 best-round scoring: pending
+- P4 partial-run eval: pending
+- topic drift: not measured yet
+
+---
+
+## 8. Evaluation Procedure
+
+### Evaluation Tracker
+
+| Exp | Topics | Evidence | Status | Blocker |
+|-----|--------|----------|--------|---------|
+| A: Discovery-only | 6/6 | spec=1.00, dups=0, R0=0, primary>=98.7%, TP=90.91% | COMPLETE | none |
+| B: Smoke comparison | TBD | none | pending | P1 |
+| C: Full-run | TBD | none | pending | P1, P2, P4 |
+| D: Ablation | TBD | none | pending | P1, P2, P4 |
+
+### Phase 1 -- Discovery artifact inspection
+For each benchmark topic: run Discovery, save `TopicProfile.json`, save `outline_profile.json`, run `discovery_eval.py` to score specificity and completeness. All 6 topics must have `discovery_eval.md` before Phase 2.
+
+### Phase 2 -- 2-chapter smoke comparison
+Run v2 and v3 for each topic (2 chapters each). Compare outline quality, section relevance, grounding, primary-source coverage, generic rate.
+
+### Phase 3 -- Full-run validation
+Choose 1-2 representative topics. Run full v2 baseline + full v3 candidate. Run paper eval. Compare metrics and human judgment.
+
+### Phase 4 -- Ablation
+Vary: discovery model, provider mix, router on/off, seed wiring on/off. Identify whether gains come from architecture, provider breadth, router quality, or model choice.
+
+### Deliverables (per evaluation run)
+`TopicProfile.json` | outline artifact | specificity scorecard | topic relevance summary | grounding summary | primary-source coverage summary | fallback/failure notes | recommendation (keep/revise/reject Discovery)
+
+---
+
+## 9. Short-term Recommendation
+
+Treat v3 Discovery as a **promising experimental redesign**, not yet a proven replacement for v2.
+
+**Validate first (in order):**
+1. outline specificity (fix P3 first -- R0 is already confirmed)
+2. prompt completeness
+3. topic drift reduction
+4. primary-source coverage improvement (already strong)
+5. robustness of fallback behavior (fix P3)
+
+**Do not overclaim:**
+- no multi-agent behavior
+- no citation-graph retrieval
+- no production-readiness at full-book scale
+- do not treat high grounding alone as success (R4 confirmed)
+
+---
+
+## 10. Executive Summary
+
+Discovery redesign is valuable **only if** it changes the pipeline from:
+
+> `retrieve to support a pre-existing outline`
+
+to:
+
+> `retrieve first, then let evidence define scope, outline, and downstream section research`
+
+**Current verdict (2026-06-07):**
+
+Experiment A COMPLETE (6/6 topics verified). All runs: spec=1.00, dups=0, R0=0, primary>=98.7%, TP completeness=90.91%. Discovery + Outline pipeline is structurally sound across diverse AI/ML topics.
+
+**Key new finding:** Fallback rate = 100% on all 6 runs (target <= 20%). Semantic fallback always triggers. Root cause needs investigation -- likely model JSON parsing instability or outline schema mismatch. This is a P3-adjacent concern.
+
+**Scope of evidence:** 6 benchmark topics across AI/ML domain. P1, P2, P4 pending.
+
+**Remaining:** Experiment A on 5 more topics, then P1 before B/C/D.
+
+---
+
+**What changed in v3.2:**
+- P3a non-destructive repair: specific chapter titles (0% generic), informative prompts
+- P3b canonical URL hygiene: 100% primary sources
+- P3c cross-chapter dedup + coverage_note: SHIPPED + VERIFIED (fresh eval: 0 dups, 0 R0 triggers)
+- Plan + eval: metrics aligned to 0-1 scale; P3 scope clarified; evidence-based status

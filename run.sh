@@ -1,7 +1,9 @@
 #!/bin/bash
 # ============================================================
-# run.sh -- Deep Research Pipeline launcher
+# run.sh -- Deep Research Pipeline launcher  [LEGACY v2]
 # ============================================================
+# LEGACY v2 path (files/deep_research.py). Live pipeline = run_full.sh
+# (files/deep_research_v3.py). See CLAUDE.md. Kept for the v2 runner/eval stack.
 # Stage 1 of the Agentic Deep Research roadmap.
 # Default mode wraps the pipeline in an autonomous runner with
 # health monitoring, crash recovery, and PDF render on finish.
@@ -12,17 +14,25 @@
 #   ./run.sh watch       # tail progress only
 #   ./run.sh review      # autonomous runner + LLM-as-judge review pass
 #
-# Outputs land in files/output/ as book.{md,html,pdf},
+# Outputs land in files/output/runs/book/ as book.{md,html,pdf},
 # state.json, report.json, pipeline.log, runner.log.
 # ============================================================
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-STATE_FILE="$SCRIPT_DIR/files/output/state.json"
-RUNNER_LOG="$SCRIPT_DIR/files/output/runner.log"
+RUN_DIR="$SCRIPT_DIR/files/output/runs/book"
+STATE_FILE="$RUN_DIR/state.json"
+RUNNER_LOG="$RUN_DIR/runner.log"
 MODEL="gemma3:4b"
 
 cd "$SCRIPT_DIR"
+
+# Auto-load .env (set -a exports all vars; source reads them; set +a turns it off)
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    set -a
+    source "$SCRIPT_DIR/.env"
+    set +a
+fi
 
 echo "============================================================"
 echo "  Deep Research Pipeline -- Agentic Book Generator"
@@ -66,9 +76,9 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  Output: files/output/book.pdf"
+echo "  Output: files/output/runs/book/book.pdf"
 echo "  Runner log:   $RUNNER_LOG"
-echo "  Live stdout:  files/output/pipeline.stdout.log"
+echo "  Live stdout:  files/output/runs/book/pipeline.stdout.log"
 echo "============================================================"
 echo ""
 

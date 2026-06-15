@@ -1,0 +1,536 @@
+#!/usr/bin/env python3
+"""
+Deep Research Pipeline v3 -- True Research-Driven Architecture
+========================================================
+
+v2: Outline (fixed) -> ForEach Section: research -> write -> verify
+v3: Topic -> DISCOVER structure -> OUTLINE (emerges) -> ForEach Section: DEEP investigate
+
+Usage:
+  python3 files/deep_research_v3.py --topic "Attention Mechanisms" --out-name attn_v3
+  python3 files/deep_research_v3.py --topic "Attention Mechanisms" --out-name attn_v3 --no-smoke
+"""
+import argparse, json, re, sys, time
+from dataclasses import asdict
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent.resolve()
+sys.path.insert(0, str(ROOT))
+
+from research.discovery import discover_topic, TopicProfile
+from research.outline_from_research import generate_outline, OutlineProfile, OutlineValidationError
+from research.deep_investigate import investigate_section
+
+# Constants shared with research layer
+try:
+    from research import canonical_seeds as _canonical_seeds
+    from research.config import PRIMARY_FLOOR as _PRIMARY_FLOOR, PROVIDERS_DEFAULT as _PROVIDERS_DEFAULT
+    _RESEARCH_AVAILABLE = True
+except ImportError:
+    _canonical_seeds = None
+    _PRIMARY_FLOOR = 0
+    _PROVIDERS_DEFAULT = ("arxiv", "wikipedia", "ddg")
+    _RESEARCH_AVAILABLE = False
+
+
+# ============================================================================
+# Math normalization (fixes display-math mangling that crashed tectonic; Rank9/10)
+# ============================================================================
+
+def _code_fence_spans(text: str):
+    return [(m.start(), m.end()) for m in re.finditer(r"```.*?```", text, re.DOTALL)]
+
+
+_GLUED_DISPLAY_RE = re.compile(r"(?<=[}\)\]A-Za-z0-9])\$\$(?=\s*\\[A-Za-z])")
+
+
+def _split_glued_display(content: str) -> str:
+    """Split `$$F1$$F2$$`-style glued display formulas into separate blocks."""
+    new, n = _GLUED_DISPLAY_RE.subn("$$\n\n$$", content)
+    if n:
+        print(f"[normalize_math] split {n} glued display-math delimiter(s)", flush=True)
+    return new
+
+
+def _balance_display_math(content: str) -> str:
+    """Repair odd `$$` counts (outside fenced code) that crash tectonic with
+    'Missing $ inserted'. With an odd count the LAST `$$` is unpaired; the
+    unclosed formula can sit on EITHER side of it:
+      - MISSING-OPENER: a LaTeX-bearing segment sits between the prev `$$` and
+        the orphan -> wrap that segment as its own display block.
+      - MISSING-CLOSER: a LaTeX-bearing segment trails AFTER the orphan (writer
+        opened `$$F` and never closed) -> close it by appending `$$`.
+      - otherwise (no LaTeX either side) -> drop the orphan delimiter.
+    """
+    fences = _code_fence_spans(content)
+    def in_fence(pos):
+        return any(a <= pos < b for a, b in fences)
+    positions = [m.start() for m in re.finditer(r"\$\$", content) if not in_fence(m.start())]
+    if len(positions) % 2 == 0:
+        return content
+    last = positions[-1]
+    prev = positions[-2] if len(positions) >= 2 else None
+    before = content[prev + 2:last] if prev is not None else ""
+    after = content[last + 2:]
+    has_latex = lambda s: bool(re.search(r"\\[A-Za-z]+", s))
+    if has_latex(after) and not has_latex(before):
+        m = re.search(r"\n\s*\n", after)
+        cut = (last + 2 + m.start()) if m else len(content)
+        print("[normalize_math] odd $$ count; closing unclosed trailing display formula", flush=True)
+        return content[:cut] + "$$" + content[cut:]
+    if prev is not None and has_latex(before):
+        print("[normalize_math] odd $$ count; wrapping dangling display formula (missing opener)", flush=True)
+        return (content[:prev + 2] + "\n\n$$" + before.strip() + "$$\n\n"
+                + content[last + 2:])
+    print(f"[normalize_math] odd $$ count ({len(positions)}); dropping orphan display delimiter", flush=True)
+    return content[:last] + content[last + 2:]
+
+
+_MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+?\$", re.DOTALL)
+
+_GREEK_TEX = {
+    "α": r"\alpha ", "β": r"\beta ", "γ": r"\gamma ", "δ": r"\delta ",
+    "ε": r"\epsilon ", "ζ": r"\zeta ", "η": r"\eta ", "θ": r"\theta ",
+    "ι": r"\iota ", "κ": r"\kappa ", "λ": r"\lambda ", "μ": r"\mu ",
+    "ν": r"\nu ", "ξ": r"\xi ", "π": r"\pi ", "ρ": r"\rho ",
+    "σ": r"\sigma ", "τ": r"\tau ", "υ": r"\upsilon ", "φ": r"\phi ",
+    "χ": r"\chi ", "ψ": r"\psi ", "ω": r"\omega ",
+    "Γ": r"\Gamma ", "Δ": r"\Delta ", "Θ": r"\Theta ", "Λ": r"\Lambda ",
+    "Ξ": r"\Xi ", "Π": r"\Pi ", "Σ": r"\Sigma ", "Φ": r"\Phi ",
+    "Ψ": r"\Psi ", "Ω": r"\Omega ",
+}
+
+_MATH_UNICODE = {
+    "ℝ": r"\mathbb{R}", "ℕ": r"\mathbb{N}", "ℤ": r"\mathbb{Z}",
+    "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}", "𝔼": r"\mathbb{E}",
+    "∈": r"\in", "∉": r"\notin", "∞": r"\infty", "∑": r"\sum",
+    "∏": r"\prod", "∇": r"\nabla", "∂": r"\partial",
+    "≈": r"\approx", "≤": r"\leq", "≥": r"\geq", "≠": r"\neq",
+    "×": r"\times", "⋅": r"\cdot",
+    "²": r"^{2}", "³": r"^{3}", "⁴": r"^{4}", "ⁿ": r"^{n}",
+    "₀": r"_{0}", "₁": r"_{1}", "₂": r"_{2}", "√": r"\sqrt{}",
+}
+
+
+def _escape_unicode_math(content: str) -> str:
+    import unicodedata
+    content = "".join(
+        unicodedata.normalize("NFKC", c) if 0x1D400 <= ord(c) <= 0x1D7FF else c
+        for c in content
+    )
+    def _fix_span(m):
+        span = m.group(0)
+        for ch, tex in _GREEK_TEX.items():
+            if ch in span:
+                span = span.replace(ch, tex + " ")
+        for ch, tex in _MATH_UNICODE.items():
+            if ch in span:
+                span = span.replace(ch, tex + " ")
+        return span
+    content = _MATH_SPAN_RE.sub(_fix_span, content)
+    for ch, tex in _MATH_UNICODE.items():
+        if ch in content:
+            content = content.replace(ch, f"${tex}$")
+    return content
+
+
+def normalize_math(content: str) -> str:
+    """Normalize display math so pandoc/tectonic render correctly (Rank9/10)."""
+    content = _split_glued_display(content)
+    content = _balance_display_math(content)
+    content = _escape_unicode_math(content)
+    return content
+
+
+def _sanitize_section_content(content: str) -> str:
+    if not content:
+        return ""
+    cleaned = content.strip()
+    cleaned = cleaned.replace("\r\n", "\n")
+    cleaned = cleaned.replace("\n# Chapter:", "\nChapter:")
+    cleaned = cleaned.replace("\n## Section:", "\nSection:")
+    cleaned = cleaned.replace("\n# Diffusion Models for Generative AI: Introduction and Core Concepts", "")
+    cleaned = cleaned.replace("\n__\n", "\n")
+    cleaned = cleaned.replace("Generated by Agentic Deep Research v3\n", "")
+    cleaned = cleaned.replace("Chapter:", "")
+    cleaned = cleaned.replace("Section:", "")
+
+    # Rank9: content-bleed. A leading line carrying an orphan "(ChN.M...)" outline
+    # tag is a prior section's disambiguated title that leaked into this body.
+    # Drop that whole leading line, then strip any residual inline tag anywhere.
+    cleaned = re.sub(
+        r"\A\s*(?:#{1,6}\s*|\*\*\s*)?[^\n]*\((?:Ch|Chapter)\s*\d+\.\d+[^)]*\)[^\n]*\n+",
+        "", cleaned,
+    )
+    cleaned = re.sub(r"\s*\((?:Ch|Chapter)\s*\d+\.\d+(?:\.\d+)*[^)]*\)", "", cleaned)
+
+    # RULES Stage F (Fix): strip Writer-generated `###` subheadings from section bodies.
+    cleaned = re.sub(r"^###\s+(.+)$", r"**\1**", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+
+    # Rank9: normalize display math before returning (tectonic safety net)
+    cleaned = normalize_math(cleaned)
+    return cleaned.strip()
+
+
+def assemble_book(outline, sections, output_path):
+    _subtitle = outline.get("subtitle") or ""
+    lines = [
+        "# " + outline.get("title", "Research Book"),
+        "",
+        "_" + _subtitle + "_",
+        "",
+        "Generated by Agentic Deep Research v3",
+        "",
+    ]
+    for ch in outline.get("chapters", []):
+        _cn = str(ch.get("n", 0))
+        _ct = ch.get("t", "")
+        lines.append("# " + _cn + ". " + _ct)
+        lines.append("")
+        for sec in ch.get("sections", []):
+            _sn = str(sec.get("n", 0))
+            _st = sec.get("t", "")
+            lines.append("## " + _sn + ". " + _st)
+            lines.append("")
+            key = _cn + "." + _sn
+            content = _sanitize_section_content(sections.get(key, {}).get("content", ""))
+            lines.append(content)
+            lines.append("")
+    assembled = "\n".join(lines)
+
+    # Rank9/10: final math normalization safety net across the whole assembled doc
+    # so any section-level math mangling can't crash tectonic at render time.
+    assembled = normalize_math(assembled)
+
+    # RULES Stage F: heading hygiene check -- 0 orphans/dupes
+    heading_re = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
+    headings = [(m.start(), m.group(1), m.group(2).strip()) for m in heading_re.finditer(assembled)]
+    h2_titles = [h[2] for h in headings if h[1] == "#"]
+    h3_titles = [h[2] for h in headings if h[1] == "##"]
+    duplicate_h2 = [t for t in h2_titles if h2_titles.count(t) > 1]
+    duplicate_h3 = [t for t in h3_titles if h3_titles.count(t) > 1]
+    # Orphan headings: H3 without H2 above
+    orphan_h3 = []
+    for i, h in enumerate(headings):
+        if h[1] == "##":
+            if i == 0 or headings[i-1][1] != "#":
+                orphan_h3.append(h[2])
+
+    if duplicate_h2 or duplicate_h3 or orphan_h3:
+        print("[ASSEMBLE] WARNING heading hygiene: "
+              "dup_H2=%s %s, dup_H3=%s %s, orphans=%s %s" % (
+                  len(duplicate_h2), duplicate_h2[:2],
+                  len(duplicate_h3), duplicate_h3[:2],
+                  len(orphan_h3), orphan_h3[:2]))
+    else:
+        print("[ASSEMBLE] Heading hygiene OK: %d H2, %d H3" % (len(h2_titles), len(h3_titles)))
+
+    output_path.write_text(assembled, encoding="utf-8")
+    wc = len(output_path.read_text(encoding="utf-8").split())
+    print("[ASSEMBLE] " + str(output_path) + " (" + str(wc) + " words)")
+
+
+def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
+           providers=("arxiv", "wikipedia", "ddg"), max_rounds=2,
+           render=False, smoke=True,
+           # P0b: canonical arxiv IDs to force-inject into discovery (e.g. from gold yaml)
+           canonical_arxiv_ids=None):
+    safe_topic = topic.lower().replace(" ", "_").replace("/", "_")
+    out_name = out_name or safe_topic
+    run_dir = ROOT / "files/output/runs" / out_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print("\n" + "=" * 60)
+    print("DEEP RESEARCH v3: " + topic)
+    print("=" * 60)
+    t0 = time.time()
+
+    # Rank13: log effective providers (after key/session-disable filtering)
+    if _RESEARCH_AVAILABLE:
+        try:
+            from research import search as _search_mod
+            effective_providers = _search_mod.available_providers(providers)
+            print(f"  Providers: {list(providers)} (effective: {effective_providers})")
+        except Exception:
+            print(f"  Providers: {list(providers)}")
+    print()
+
+    # -- STAGE 0: DISCOVERY (with resume) --
+    topic_path = run_dir / "topic_profile.json"
+    if topic_path.exists():
+        data = json.loads(topic_path.read_text())
+        tp_fields = {f.name for f in TopicProfile.__dataclass_fields__.values()}
+        tp_data = {k: v for k, v in data.items() if k in tp_fields}
+        existing_ids = set(tp_data.get("canonical_arxiv_ids", []) or [])
+        new_ids = set(canonical_arxiv_ids or [])
+
+        # P0b fix: if new canonical IDs are provided that aren't already in the saved profile,
+        # re-run discovery to inject them. Merge with existing IDs to preserve what's on disk.
+        if new_ids and not new_ids.issubset(existing_ids):
+            merged_ids = list(existing_ids | new_ids)
+            print(f"\n[STAGE 0] RE-INJECT: canonical IDs missing from saved profile")
+            print(f"  Existing: {sorted(existing_ids)}")
+            print(f"  Adding:    {sorted(new_ids - existing_ids)}")
+            t = time.time()
+            topic_profile = discover_topic(topic, providers=providers, canonical_arxiv_ids=merged_ids)
+            print("[S0] Done in " + str(round(time.time() - t, 1)) + "s")
+            topic_path.write_text(json.dumps(asdict(topic_profile), indent=2, ensure_ascii=False))
+        else:
+            print("\n[STAGE 0] RESUME from existing topic_profile.json")
+            print(f"  canonical_arxiv_ids: {sorted(existing_ids) or 'none'}")
+            for k in ["_synthesis"]:
+                data.pop(k, None)
+            tp_data = {k: v for k, v in data.items() if k in tp_fields}
+            topic_profile = TopicProfile(**tp_data)
+    else:
+        print("\n[STAGE 0] DISCOVERY")
+        t = time.time()
+        topic_profile = discover_topic(topic, providers=providers, canonical_arxiv_ids=canonical_arxiv_ids)
+        print("[S0] Done in " + str(round(time.time() - t, 1)) + "s")
+        topic_path.write_text(json.dumps(asdict(topic_profile), indent=2, ensure_ascii=False))
+
+    # -- STAGE 1: OUTLINE (with resume) --
+    outline_path = run_dir / "outline_profile.json"
+    if outline_path.exists():
+        print("\n[STAGE 1] RESUME from existing outline_profile.json")
+        data = json.loads(outline_path.read_text())
+        for k in ["_raw"]:
+            data.pop(k, None)
+        outline = OutlineProfile(**data)
+    else:
+        print("\n[STAGE 1] OUTLINE (structure from evidence)")
+        t = time.time()
+        from research import search as _search
+        from research.types import Query
+        outline_sources = []
+        for q_str in topic_profile.initial_queries[:6]:
+            try:
+                outline_sources.extend(
+                    _search.gather([Query(q=q_str)], providers=providers, per_provider_k=5)
+                )
+            except Exception as e:
+                print("  [gather] " + q_str[:40] + ": " + str(e))
+        seen, unique = set(), []
+        for s in outline_sources:
+            if s.url and s.url not in seen:
+                seen.add(s.url)
+                unique.append(s)
+        try:
+            outline = generate_outline(topic_profile, unique,
+                                      n_chapters=n_chapters,
+                                      sections_per_chapter=sections_per_chapter)
+        except OutlineValidationError as e:
+            print(f"\n[OUTLINE BLOCKED] {e}")
+            print("[OUTLINE] Retrying with different parameters...")
+            outline = generate_outline(topic_profile, unique,
+                                      n_chapters=max(2, n_chapters // 2),
+                                      sections_per_chapter=min(3, sections_per_chapter))
+        print("[S1] Done in " + str(round(time.time() - t, 1)) + "s")
+        outline_path.write_text(json.dumps(asdict(outline), indent=2, ensure_ascii=False))
+
+    # -- STAGE 2: INVESTIGATION --
+    print("\n[STAGE 2] INVESTIGATION")
+    print("-" * 40)
+
+    # Load existing state for resume
+    state_path = run_dir / "state.json"
+    if state_path.exists():
+        state = json.loads(state_path.read_text())
+        sections = state.get("sections", {})
+        total_w = state.get("total_words", 0)
+        # P0c fix: run_seen_counts is now persisted in state.json
+        # It's loaded above in the run_seen_counts init block
+    else:
+        sections = {}
+        total_w = 0
+    discovered = {}
+    # P0c: track seen-count across all sections to penalize over-represented sources
+    run_seen_counts = {}
+    if sections:
+        for sec_data in sections.values():
+            for src in sec_data.get("sources", []) or []:
+                if isinstance(src, dict):
+                    sid = src.get("id") or src.get("url") or ""
+                else:
+                    sid = getattr(src, "id", "") or getattr(src, "url", "") or ""
+                if sid:
+                    run_seen_counts[sid] = run_seen_counts.get(sid, 0) + 1
+    # P0c fix: also load seen_counts from state.json on resume
+    if state_path.exists():
+        saved_counts = json.loads(state_path.read_text()).get("run_seen_counts", {})
+        for sid, cnt in saved_counts.items():
+            run_seen_counts[sid] = max(run_seen_counts.get(sid, 0), cnt)
+
+    # Rebuild discovered from existing sections
+    for key, sec_data in sections.items():
+        for c in sec_data.get("new_concepts", []):
+            if c not in discovered:
+                discovered[c] = key
+
+    chapters_to_run = outline.chapters
+    if smoke:
+        chapters_to_run = chapters_to_run[:2]
+        print("[S2] SMOKE: first " + str(len(chapters_to_run)) + " chapters")
+
+    all_sections = sum(len(ch.get("sections", [])) for ch in chapters_to_run)
+    done = sum(1 for ch in chapters_to_run
+               for sec in ch.get("sections", [])
+               if str(ch["n"]) + "." + str(sec["n"]) in sections)
+    remaining = all_sections - done
+    print("[S2] " + str(remaining) + " sections remaining")
+
+    for ch in chapters_to_run:
+        ch_n = ch["n"]
+        ch_t = ch["t"]
+        for sec in ch.get("sections", []):
+            pp_n = sec["n"]
+            pp_t = sec["t"]
+            pp_pr = sec.get("pr", "")
+            key = str(ch_n) + "." + str(pp_n)
+            if key in sections:
+                continue
+            done += 1
+            print("\n  [" + str(done) + "/" + str(all_sections) + "] " + key + ": " + pp_t)
+            prior_concepts = list(discovered.keys())
+
+            # Rank5: canonical seed injection -- resolve canonical arxiv IDs from section text
+            # so foundational papers (Vaswani, BERT, GPT-3, ...) are injected even when search
+            # queries don't surface them. Seeds bypass the cosine gate (protected by ID).
+            protected_ids = set(getattr(topic_profile, "protected_source_ids", []) or [])
+            if _RESEARCH_AVAILABLE and _canonical_seeds is not None:
+                section_text = f"{pp_pr}\n{pp_t}\n{ch_t}"
+                seed_ids = _canonical_seeds.resolve_seeds(section_text)
+                if seed_ids:
+                    print(f"  [SEED] resolved {len(seed_ids)} canonical seeds: {seed_ids}")
+                    protected_ids = protected_ids | set(seed_ids)
+
+            # Rank13: primary_floor ensures arxiv/wikipedia fill ≥N of top-8 slots
+            primary_floor = _PRIMARY_FLOOR if _RESEARCH_AVAILABLE else 0
+
+            try:
+                result = investigate_section(
+                    section_prompt=pp_pr,
+                    chapter_title=ch_t,
+                    section_title=pp_t,
+                    topic_context=(
+                        "Book: " + outline.title + " -- " + topic_profile.description
+                        + "\nCanonical terms: " + ", ".join(getattr(topic_profile, "canonical_terms", [])[:10])
+                        + "\nMust cover: " + ", ".join(getattr(topic_profile, "must_cover", [])[:10])
+                        + "\nOut of scope: " + ", ".join(getattr(topic_profile, "out_of_scope", [])[:8])
+                    ),
+                    prior_sections=[
+                        {"title": sections[k].get("title", k), "content": sections[k].get("content", "")}
+                        for k in sorted(sections.keys())
+                    ],
+                    prior_concepts=prior_concepts,
+                    providers=providers,
+                    max_rounds=max_rounds,
+                    section_meta=sec,
+                    protected_source_ids=protected_ids,
+                    run_seen_counts=run_seen_counts,
+                    primary_floor=primary_floor,
+                )
+                sections[key] = {
+                    "title": pp_t,
+                    "content": result.content,
+                    "sources": [s.to_dict() if hasattr(s, "to_dict") else s
+                                for s in result.sources],
+                    "grounding": result.grounding_score,
+                    "topic_relevance": result.topic_relevance_score,
+                    "n_citations": result.n_citations,
+                    "new_concepts": result.new_concepts,
+                    "quality": result.quality,
+                    "cross_refs": result.cross_ref_count,
+                }
+                total_w += len(result.content.split())
+                for c in result.new_concepts:
+                    if c not in discovered:
+                        discovered[c] = key
+                print("  -> " + str(len(result.content.split())) + "w | g="
+                      + str(round(result.grounding_score, 3)) + " | cites="
+                      + str(result.n_citations) + " | xrefs=" + str(result.cross_ref_count)
+                      + " | new_concepts=" + str(len(result.new_concepts)))
+            except RuntimeError as e:
+                print(f"  [S2] BLOCKED: {e}")
+                sections[key] = {
+                    "title": pp_t,
+                    "content": f"[BLOCKED: {e}]",
+                    "sources": [],
+                    "grounding": 0.0,
+                    "topic_relevance": 0.0,
+                    "n_citations": 0,
+                    "new_concepts": [],
+                    "quality": "BLOCKED",
+                    "cross_refs": 0,
+                    "block_reason": str(e),
+                }
+            tp_data = asdict(topic_profile) if 'topic_profile' in dir() and topic_profile else {}
+            state_path.write_text(
+                json.dumps({"topic": topic,
+                            "outline": asdict(outline),
+                            "profile": tp_data,
+                            "sections": sections,
+                            "total_words": total_w,
+                            "protected_source_ids": list(topic_profile.protected_source_ids) if 'topic_profile' in dir() and topic_profile else [],
+                            "canonical_arxiv_ids": list(topic_profile.canonical_arxiv_ids) if 'topic_profile' in dir() and topic_profile else [],
+                            "run_seen_counts": run_seen_counts,
+                            }, indent=2))
+
+    # -- STAGE 3: ASSEMBLE --
+    print("\n[STAGE 3] ASSEMBLE")
+    assemble_book(asdict(outline), sections, run_dir / "book.md")
+
+    # -- STAGE 4: RENDER PDF --
+    if render:
+        print("\n[STAGE 4] RENDER PDF")
+        import sys as _sys, importlib.util as _importlib
+        _sys.path.insert(0, str(ROOT / "files"))
+        from scripts.render_book import main as _render_main
+        _orig_argv = _sys.argv
+        _sys.argv = ["render_book.py", "--run", out_name]
+        try:
+            _render_main()
+        finally:
+            _sys.argv = _orig_argv
+        print(f"[RENDER] PDF: {run_dir / 'book.pdf'}")
+
+    t_total = time.time() - t0
+    print("\n" + "=" * 60)
+    print("COMPLETE in " + str(round(t_total / 60, 1)) + " min")
+    print("  Words: " + str(total_w) + " | Sections: " + str(len(sections)))
+    print("  Concepts discovered: " + str(len(discovered)))
+    print("  Output: " + str(run_dir))
+    print("=" * 60)
+    return {"topic_profile": topic_profile, "outline": outline,
+            "sections": sections, "total_words": total_w, "concepts": discovered}
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser(description="Deep Research Pipeline v3")
+    p.add_argument("--topic", "-t", required=True)
+    p.add_argument("--out-name", "-o", default=None)
+    p.add_argument("--n-chapters", type=int, default=None)
+    p.add_argument("--sections-per-chapter", type=int, default=None)
+    p.add_argument("--providers", nargs="+", default=list(_PROVIDERS_DEFAULT))
+    p.add_argument("--max-rounds", type=int, default=3)
+    p.add_argument("--no-smoke", action="store_true")
+    p.add_argument("--render", action="store_true")
+    # P0b: comma-separated list of canonical arxiv IDs to inject
+    p.add_argument("--canonical-arxiv-ids", default=None,
+                   help="Comma-separated arxiv IDs (e.g. 1706.03762,2203.02155) to force-inject")
+    args = p.parse_args()
+
+    canonical_ids = None
+    if args.canonical_arxiv_ids:
+        canonical_ids = [i.strip() for i in args.canonical_arxiv_ids.split(",") if i.strip()]
+    run_v3(
+        topic=args.topic,
+        out_name=args.out_name,
+        n_chapters=args.n_chapters,
+        sections_per_chapter=args.sections_per_chapter,
+        providers=tuple(args.providers),
+        max_rounds=args.max_rounds,
+        render=args.render,
+        smoke=not args.no_smoke,
+        canonical_arxiv_ids=canonical_ids,
+    )

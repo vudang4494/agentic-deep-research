@@ -9,7 +9,7 @@ Usage:
 Workflow:
     1. Load files/eval/topics/<name>.yaml (gold standard)
     2. Run deep_research.run() with the topic's n_chapters / n_passes
-    3. Read files/output/eval_<name>_<ts>.state.json
+    3. Read files/output/runs/eval_<name>_<ts>/state.json
     4. Compute per-section + aggregate + pass/fail metrics
     5. Write files/eval/reports/eval_<name>_<ts>.{json,md}
 """
@@ -40,25 +40,28 @@ def _load_gold(topic_slug: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _run_pipeline(gold: dict, out_name: str) -> dict:
+def _run_pipeline(gold: dict, out_name: str, end_ch: int | None = None) -> dict:
     """Invoke deep_research.run() with the gold topic. Returns timings dict."""
     import deep_research  # noqa: WPS433 -- dynamic import after sys.path adjust
 
+    n_chapters = gold.get("n_chapters", 12)
+    n_passes = gold.get("n_passes", 8)
+    end = end_ch if end_ch is not None else n_chapters
     t0 = time.time()
     print(f"\n=== EVAL: launching pipeline for topic={gold['topic']!r} ===")
-    print(f"  n_chapters={gold.get('n_chapters', 12)}, n_passes={gold.get('n_passes', 8)}")
+    print(f"  chapters={end}, n_passes={n_passes} ({end * n_passes} sections)")
     print(f"  out_name={out_name}")
     print()
     deep_research.run(
         batch=1,
         start_ch=1, start_pp=1,
-        end_ch=gold.get("n_chapters", 12),
+        end_ch=end,
         render=False,
         review=False,                # keep eval focused on retrieval+grounding
         research=True,
         topic=gold["topic"],
-        n_chapters=gold.get("n_chapters", 12),
-        n_passes=gold.get("n_passes", 8),
+        n_chapters=n_chapters,
+        n_passes=n_passes,
         out_name=out_name,
     )
     elapsed = time.time() - t0
@@ -67,7 +70,7 @@ def _run_pipeline(gold: dict, out_name: str) -> dict:
 
 
 def _load_state(out_name: str) -> dict:
-    state_path = ROOT / "files" / "output" / f"{out_name}.state.json"
+    state_path = ROOT / "files" / "output" / "runs" / out_name / "state.json"
     if not state_path.exists():
         raise FileNotFoundError(f"state.json not found at {state_path}")
     with open(state_path) as f:
@@ -81,7 +84,7 @@ def _assemble_book_text(state: dict) -> str:
     return "\n\n".join(v.get("content", "") for _, v in ordered)
 
 
-def _score(state: dict, gold: dict) -> dict:
+def _score(state: dict, gold: dict, *, is_partial: bool = False) -> dict:
     passes = state.get("passes", {})
     per_section = [
         M.section_metrics(k, passes[k], gold)
@@ -89,7 +92,7 @@ def _score(state: dict, gold: dict) -> dict:
     ]
     book_text = _assemble_book_text(state)
     agg = M.aggregate(per_section, gold, book_text)
-    pf = M.pass_fail(agg, gold.get("thresholds", {}))
+    pf = M.pass_fail(agg, gold.get("thresholds", {}), is_partial=is_partial)
     return {"per_section": per_section, "aggregate": agg, "pass_fail": pf}
 
 
@@ -112,6 +115,8 @@ def _write_md_report(path: Path, payload: dict) -> None:
     lines.append(f"- Difficulty: `{g.get('difficulty', '?')}`")
     lines.append(f"- Outline: {g.get('n_chapters')} chapters x {g.get('n_passes')} passes "
                  f"= {agg['n_sections']} sections actually generated")
+    if payload.get("is_partial_run"):
+        lines.append(f"- Partial run: `yes` (breadth-sensitive thresholds relaxed)")
     if payload.get("timings", {}).get("elapsed_sec"):
         lines.append(f"- Elapsed: {payload['timings']['elapsed_sec']/60:.1f} min")
     lines.append("")
@@ -176,6 +181,10 @@ def main() -> int:
                    help="explicit state.json path (with --skip-pipeline)")
     p.add_argument("--out-name",
                    help="override the auto-generated --out-name for the pipeline run")
+    p.add_argument("--end-ch", type=int, default=None,
+                   help="stop after this chapter (inclusive). Default: run all gold chapters.")
+    p.add_argument("--partial", action="store_true",
+                   help="score as a partial run (relax breadth-sensitive thresholds only)")
     args = p.parse_args()
 
     gold = _load_gold(args.topic)
@@ -184,19 +193,21 @@ def main() -> int:
     out_name = args.out_name or f"eval_{args.topic}_{run_id}"
     timings = {}
     if not args.skip_pipeline:
-        timings = _run_pipeline(gold, out_name)
+        timings = _run_pipeline(gold, out_name, end_ch=args.end_ch)
         state = _load_state(out_name)
     else:
-        state_path = Path(args.state) if args.state else ROOT / "files" / "output" / f"{out_name}.state.json"
+        state_path = Path(args.state) if args.state else ROOT / "files" / "output" / "runs" / out_name / "state.json"
         with open(state_path) as f:
             state = json.load(f)
 
-    scores = _score(state, gold)
+    is_partial = bool(args.partial or (args.end_ch is not None and args.end_ch < gold.get("n_chapters", 999)))
+    scores = _score(state, gold, is_partial=is_partial)
     payload = {
         "run_id": run_id,
         "topic_slug": args.topic,
         "gold": gold,
         "timings": timings,
+        "is_partial_run": is_partial,
         "scores": scores,
     }
     json_path = HERE / "reports" / f"eval_{args.topic}_{run_id}.json"

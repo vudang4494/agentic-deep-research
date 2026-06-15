@@ -25,9 +25,9 @@ from .query_gen import _strip_think
 from .types import Query
 
 OLLAMA_BASE = "http://localhost:11434"
-DEFAULT_PLANNER_MODEL = "qwen35:9b"  # 9B: 4B truncated 15-chapter outlines (bookv4 maxed at 10/15)
-# 132-section JSON outlines push ~6000 output tokens; qwen3.5:4b ~30 tok/s -> ~200s.
-# Pad to 480s so 200-section outlines and CPU-only fallbacks still fit.
+DEFAULT_PLANNER_MODEL = "batiai/qwen3.6-35b:iq3"  # MoE 35B / 3B active, ~15 tok/s on M4
+# qwen35:9b removed -- not available in this Ollama install.
+# If qwen3.6-35b fails (OOM, timeout), planner falls back to hardcoded outline.
 DEFAULT_TIMEOUT = 480.0
 
 DEFAULT_N_CHAPTERS = 12
@@ -178,13 +178,14 @@ def _chat(messages: list, model: str, timeout: float,
     payload = {
         "model": model, "stream": False, "messages": messages,
         "options": {"temperature": temperature, "num_predict": num_predict, "top_p": 0.9},
-        "think": False,
+        "think": False,  # Force content into "message.content", not "thinking" block
     }
     try:
         with httpx.Client(timeout=timeout) as c:
             r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
             r.raise_for_status()
-            return (r.json().get("message") or {}).get("content", "")
+            raw = (r.json().get("message") or {}).get("content", "")
+            return _strip_think(raw)  # Strip any remaining think blocks defensively
     except Exception as e:
         print(f"[planner] _chat error: {e}", flush=True)
         return ""

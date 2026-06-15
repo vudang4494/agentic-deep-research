@@ -23,9 +23,9 @@ Pure-Python except for bge-m3 embeddings via the running Ollama. Safe to run
 against a state.json that is still being written (we read once and analyze).
 
 Usage:
-  python3 files/eval/audit_outline.py --state files/output/bookv3.state.json --topic "Large Language Models"
-  python3 files/eval/audit_outline.py --state files/output/bookv3.state.json \
-      --topic "Large Language Models" --out files/eval/reports/audit_bookv3.md
+  python3 files/eval/audit_outline.py --state files/output/runs/bookv7/state.json --topic "Large Language Models"
+  python3 files/eval/audit_outline.py --state files/output/runs/bookv7/state.json \
+      --topic "Large Language Models" --out files/eval/reports/audit_bookv7.md
 """
 from __future__ import annotations
 

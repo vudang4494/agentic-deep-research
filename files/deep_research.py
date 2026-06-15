@@ -2,9 +2,13 @@
 """
 Deep Research Pipeline -- Agentic Book Generator
 =================================================
+[LEGACY v2 -- pre-fixed outline. NOT the live pipeline.]
+Live orchestrator = files/deep_research_v3.py (see CLAUDE.md). This v2 path is
+kept only because runner.py / monitor.py / eval/run_eval.py still import it.
+Do NOT edit this as if it were the active pipeline.
+
 Stage 1 of the Agentic Deep Research roadmap: section-by-section book generation
 with prior-section memory, optional LLM-as-judge review, and structural sanitization.
-Future stages add retrieval, planning, and re-search loops (see WORKPLAN.md).
 
 Current implementation:
   - 12 chapters x N passes (atomic LLM calls, ~1,300 words each)
@@ -37,30 +41,37 @@ except Exception as _research_import_err:
 
 # === CONFIG ===
 OLLAMA_BASE  = "http://localhost:11434"
-# Writer model: override via env DEEP_RESEARCH_WRITER_MODEL.
-# Recommended upgrades for better synthesis:
-#   - qwen2.5:7b  (~4.7 GB, better instruction-following)
-#   - qwen2.5:14b (~9 GB,   noticeably stronger synthesis if RAM allows)
-#   - mixtral:8x7b (~26 GB, only if you have the headroom)
-MODEL = os.environ.get("DEEP_RESEARCH_WRITER_MODEL", "gemma3:4b")
+# Writer model: qwen3.6-35b:iq3 (MoE 35B/3B active, IQ3_8K) -- best prose quality.
+# Research layer: gemma4:e4b (fast, 6.4 GB) -- QGN, VFY, RSR.
+# Pull: ollama pull batiai/qwen3.6-35b:iq3 && ollama pull gemma4:e4b
+MODEL = os.environ.get("DEEP_RESEARCH_WRITER_MODEL", "batiai/qwen3.6-35b:iq3")
 DEFAULT_TIMEOUT = 600
 
 BASE_DIR  = Path(__file__).parent
 OUT_DIR   = BASE_DIR / "output"
+RUNS_DIR  = OUT_DIR / "runs"
 OUT_DIR.mkdir(exist_ok=True)
 
-STATE_FILE   = OUT_DIR / "state.json"
-FINAL_MD     = OUT_DIR / "book.md"
-FINAL_HTML   = OUT_DIR / "book.html"
-FINAL_PDF    = OUT_DIR / "book.pdf"
-CLEAN_MD     = OUT_DIR / "book.clean.md"
-REPORT_FILE  = OUT_DIR / "report.json"
-LOG_FILE     = OUT_DIR / "pipeline.log"
+# Every run lives in its own folder under output/runs/<name>/ with neutral
+# filenames (book.md, state.json, ...). The folder carries the version; the
+# files do not repeat it. Default (no --out-name) is the run named "book".
+# Folder creation is deferred to write time so importing this module (e.g. by
+# watch.sh / the eval harness) does not litter empty run dirs.
+_DEFAULT_RUN = RUNS_DIR / "book"
+
+STATE_FILE   = _DEFAULT_RUN / "state.json"
+FINAL_MD     = _DEFAULT_RUN / "book.md"
+FINAL_HTML   = _DEFAULT_RUN / "book.html"
+FINAL_PDF    = _DEFAULT_RUN / "book.pdf"
+CLEAN_MD     = _DEFAULT_RUN / "book.clean.md"
+REPORT_FILE  = _DEFAULT_RUN / "report.json"
+LOG_FILE     = _DEFAULT_RUN / "pipeline.log"
 
 
 def _rebind_output_paths(out_name: str):
-    """Repoint every output path so a single run can produce its own family of
-    artifacts (book1.md / book1.pdf / book1.state.json / ...). Idempotent.
+    """Repoint every output path into output/runs/<name>/ so a run produces its
+    own folder of neutral-named artifacts (book.md / book.pdf / state.json / ...).
+    Idempotent.
 
     Mirror this convention in runner.py via the DEEP_RESEARCH_OUT_NAME env var.
     """
@@ -68,13 +79,15 @@ def _rebind_output_paths(out_name: str):
     name = out_name.strip().strip("/")
     if not name:
         return
-    STATE_FILE  = OUT_DIR / f"{name}.state.json"
-    FINAL_MD    = OUT_DIR / f"{name}.md"
-    FINAL_HTML  = OUT_DIR / f"{name}.html"
-    FINAL_PDF   = OUT_DIR / f"{name}.pdf"
-    CLEAN_MD    = OUT_DIR / f"{name}.clean.md"
-    REPORT_FILE = OUT_DIR / f"{name}.report.json"
-    LOG_FILE    = OUT_DIR / f"{name}.pipeline.log"
+    base = RUNS_DIR / name
+    base.mkdir(parents=True, exist_ok=True)
+    STATE_FILE  = base / "state.json"
+    FINAL_MD    = base / "book.md"
+    FINAL_HTML  = base / "book.html"
+    FINAL_PDF   = base / "book.pdf"
+    CLEAN_MD    = base / "book.clean.md"
+    REPORT_FILE = base / "report.json"
+    LOG_FILE    = base / "pipeline.log"
 
 # Legacy filenames migrated to the new structure on first run.
 _LEGACY_MAP = {
@@ -262,6 +275,7 @@ class OllamaClient:
         payload = {
             "model": self.model,
             "stream": False,
+            "think": False,
             "messages": msgs,
             "options": {
                 "temperature": temperature,
@@ -280,6 +294,11 @@ class OllamaClient:
                 data = r.json()
         msg = data.get("message", {})
         content = msg.get("content", "").strip()
+        # Some quantized models may put content in "thinking" field; fallback.
+        if not content:
+            thinking = msg.get("thinking", "").strip()
+            if thinking:
+                content = thinking
         ec = data.get("eval_count", 0)
         ed = data.get("eval_duration", 0)
         tps = ec / (ed / 1e9) if ed > 0 else 0
@@ -332,9 +351,17 @@ SYS = (
     "7. Do NOT repeat definitions of concepts that have already been introduced earlier in the book "
     "(a context block will tell you what was covered). Reference them and build on them.\n"
     "8. Avoid filler -- prefer dense technical content over restating the topic. Quality over word count.\n"
-    "9. Write in a scholarly, precise style. Include formulas in LaTeX (`$...$` or `$$...$$`) and "
+    "9. VISUALS (use liberally): Add markdown tables for comparison content, a reference "
+    "table at the start of every section comparing the methods/approaches discussed, "
+    "and code blocks for implementations. Tables look like:\n\n"
+    "    | Method | Pros | Cons | Best For |\n"
+    "    | :--- | :--- | :--- | :--- |\n"
+    "    | Method A | ... | ... | ... |\n\n"
+    "Use comparison tables for: method surveys, benchmark results, hyperparameter ranges, "
+    "architecture comparisons, and any content where a grid is clearer than prose.\n"
+    "10. Write in a scholarly, precise style. Include formulas in LaTeX (`$...$` or `$$...$$`) and "
     "code examples in fenced blocks where genuinely useful.\n"
-    "10. MATH NOTATION: every variable, Greek letter, subscript, superscript, fraction, sum, "
+    "11. MATH NOTATION: every variable, Greek letter, subscript, superscript, fraction, sum, "
     "or operator MUST be inside `$...$` (inline) or `$$...$$` (display). Do NOT use HTML "
     "`<sub>`/`<sup>` tags, do NOT italic-wrap symbols like `*alpha*` or `*beta*`, do NOT "
     "duplicate a formula in both a Unicode/plain-text form AND a LaTeX form -- write each "
@@ -1091,10 +1118,10 @@ def _prepare_prompt(prompt: str, target_words: int, has_evidence: bool) -> str:
 
 
 def gen(client, ch_n, ch_t, pp_n, pp_t, prompt, target_words, context_block="", evidence_block=""):
-    # W1: num_predict tightly capped to the dynamic target so the writer
-    # physically cannot ramble past it. 2.0x is the empirical ratio between
-    # tokens and words for gemma3/qwen3.5 English output.
-    num_predict = max(800, min(int(target_words * 2.0), 4000))
+    # W1: num_predict capped to 2x the dynamic word target.
+    # 2.0x is the empirical ratio between tokens and words for English output.
+    # Ceiling raised from 4000 to 6000: longer sections need headroom.
+    num_predict = max(800, min(int(target_words * 2.0), 6000))
     has_evidence = bool(evidence_block.strip())
     prepared_prompt = _prepare_prompt(prompt, target_words, has_evidence)
     user_prompt = "%s%sChapter %d: %s -- Section %d: %s\n\n%s" % (
@@ -1104,6 +1131,9 @@ def gen(client, ch_n, ch_t, pp_n, pp_t, prompt, target_words, context_block="", 
     # regardless of context). 40% gives the writer permission to stop early
     # without making us accept a one-paragraph stub.
     min_accept = max(200, int(target_words * 0.4))
+    # Zero-citation detection: if section has no [N] markers, it is a fail.
+    # Retry up to 3 times to get citations.
+    _cite_re = re.compile(r"\[(\d+)\]")
     for attempt in range(3):
         try:
             content, stats = client.generate(
@@ -1114,8 +1144,14 @@ def gen(client, ch_n, ch_t, pp_n, pp_t, prompt, target_words, context_block="", 
             )
             content = sanitize(content)
             w = wc(content)
-            if w >= min_accept or attempt == 2:
+            n_cites = len(_cite_re.findall(content))
+            # Accept if word count sufficient OR (has citations OR last attempt)
+            if (w >= min_accept and n_cites > 0) or attempt == 2:
                 return content, stats, w
+            # If words OK but zero citations, warn and retry
+            if w >= min_accept and n_cites == 0:
+                log(f"  [WARN] attempt {attempt+1}: 0 citations, regenerating...")
+                time.sleep(2)
         except Exception as e:
             log(f"  Attempt {attempt+1} failed: {e}")
             time.sleep(5)
@@ -1371,7 +1407,10 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         research=True, topic=None, n_chapters=None, n_passes=None, out_name=None):
     if out_name:
         _rebind_output_paths(out_name)
-        print(f"[deep_research] output paths rebound: prefix={out_name!r}", flush=True)
+        print(f"[deep_research] output dir: {STATE_FILE.parent}", flush=True)
+    # Ensure the run dir exists for the default ("book") run too, regardless of
+    # platform / fcntl availability, before any artifact is written.
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     migrate_legacy_outputs()
 
     # W3: refuse to run if another pipeline already owns this output basename.
@@ -1403,7 +1442,8 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 outline_source = (f"planner-generated for topic {topic!r} "
                                   f"({len(planned)}x{len(planned[0]['passes'])})")
             else:
-                print(f"[planner] WARN: outline generation failed -- falling back to hardcoded CHAPTERS")
+                print(f"[planner] WARN: planner returned None -- using hardcoded outline (generic LLM book)",
+                      flush=True)
 
     # Outline dedupe: inject 'already-introduced' directives into prompts where a
     # high-traffic concept (attention, scaling laws, RAG, ...) reappears across
@@ -1492,12 +1532,42 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         if research_enabled:
             current_hint = None
             best_round = None  # Rank4: keep the highest-grounding round, not the last
+            # Track prior queries/sources across rounds to detect wasted re-search
+            prior_query_sigs: set[str] = set()
+            prior_source_ids: set[str] = set()
             for round_n in range(1, _research.MAX_RESEARCH_ROUNDS + 1):
                 t_r = time.time()
-                queries = _research.query_gen.queries_for(prompt, ch_t, pp_t, reviewer_hint=current_hint)
+                # Pass prior round state so query_gen can diversify
+                queries = _research.query_gen.queries_for(
+                    prompt, ch_t, pp_t, reviewer_hint=current_hint,
+                    prior_query_sigs=prior_query_sigs if round_n > 1 else None,
+                )
+                # Signature each query for overlap detection
+                q_sigs = set()
+                for q in queries:
+                    sig = (q.q.strip().lower()[:60], getattr(q, "intent", "unknown"))
+                    q_sigs.add(sig)
                 raw_sources = _research.search.gather(
                     queries, providers=_research.PROVIDERS_DEFAULT, per_provider_k=3,
                 )
+                # Guard: detect high source overlap between rounds to skip wasted re-search.
+                # If round 2 sees >60% of its sources already seen in round 1, it is
+                # unlikely to add novel coverage -- abort the round and ship best so far.
+                if round_n > 1 and raw_sources:
+                    seen_ids = prior_source_ids
+                    overlap_count = sum(
+                        1 for s in raw_sources
+                        if (getattr(s, "id", "") or "") in seen_ids
+                        or any((getattr(s, "url", "") or "") == prior_url
+                                for prior_url in seen_ids)
+                    )
+                    overlap_frac = overlap_count / len(raw_sources)
+                    print(f"  [OVERLAP r{round_n}] {overlap_count}/{len(raw_sources)} "
+                          f"({overlap_frac:.0%}) sources already seen in round 1")
+                    if overlap_frac > 0.6 and best_round is not None:
+                        print(f"  [OVERLAP r{round_n}] HIGH overlap — skipping round {round_n}, "
+                              "shipping best round so far")
+                        break
                 # Rank5: known-item retrieval. Resolve canonical paper/method names
                 # mentioned in this section to arxiv IDs and fetch them directly, so
                 # foundations (Vaswani, BERT, GPT-3, ...) are present even when the
@@ -1516,12 +1586,34 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                     raw_sources, prompt, embed_model=_research.EMBED_MODEL,
                     protected_ids=protected,
                 )
-                ranked = _research.notes.rank(
-                    prefiltered, prompt,
-                    top_k=_research.TOP_K_DEFAULT, embed_model=_research.EMBED_MODEL,
-                    precomputed=True,            # Rank13: reuse prefilter's cached relevance
-                    primary_floor=_research.PRIMARY_FLOOR,  # Rank6: reserve arxiv/wiki slots
-                )
+                # v2 path: RRF fusion (sparse BM25 + dense cosine) for better recall
+                if _research.VFY_V2_AVAILABLE:
+                    ranked = _research.notes.rank_rrf(
+                        prefiltered, prompt,
+                        top_k=_research.TOP_K_RETRIEVE,
+                        embed_model=_research.EMBED_MODEL,
+                        primary_floor=_research.PRIMARY_FLOOR,
+                        protected_ids=protected,
+                    )
+                else:
+                    ranked = _research.notes.rank(
+                        prefiltered, prompt,
+                        top_k=_research.TOP_K_RETRIEVE,
+                        embed_model=_research.EMBED_MODEL,
+                        precomputed=True,
+                        primary_floor=_research.PRIMARY_FLOOR,
+                        protected_ids=protected,
+                    )
+
+                # v2: RRK reranking — cross-encoder replaces cosine as relevance gate
+                if _research.VFY_V2_AVAILABLE:
+                    try:
+                        ranked = _research.rerank.rerank(prompt, ranked, top_k=_research.TOP_K_FINAL)
+                        print(f"  [RRK] reranked to top-{len(ranked)} by cross-encoder")
+                    except Exception as e:
+                        print(f"  [RRK] failed ({e}), falling back to cosine top-8", flush=True)
+                        ranked = ranked[:_research.TOP_K_FINAL]
+
                 ranked = _research.notes.enrich_top_sources(
                     ranked, top_n=_research.FULL_TEXT_TOP_N, max_words_per=_research.FULL_TEXT_MAX_WORDS,
                 )
@@ -1556,13 +1648,57 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                     print(f"  [CITE-GUARD] WARN residual placeholder survived cleaner: {_resid[:3]}")
 
                 t_v = time.time()
-                verify_res = _research.verify.verify_section(
-                    content, ranked, model=_research.JUDGE_MODEL,
-                )
+
+                    # v2: HHEM grounding + CRAG decision (cascaded: RRK already done above)
+                if _research.VFY_V2_AVAILABLE:
+                    try:
+                        from research import faithfulness as _f_mod
+                        # Decompose claims + HHEM grounding
+                        claims = _f_mod.decompose_claims(content, None)
+                        grounding_res = _f_mod.grounding_score(claims, ranked)
+                        round_idx_0 = round_n - 1  # 0-indexed
+
+                        verify_res = _research.verify.verify_section_v2(
+                            content, ranked,
+                            section_prompt=prompt,
+                            grounding_result=grounding_res,
+                            round_idx=round_idx_0,
+                            max_rounds=_research.MAX_RESEARCH_ROUNDS,
+                            llm_call_fn=None,  # answer_relevance/strip_refine use v1 judge
+                        )
+
+                        # CRAG decision
+                        crag = verify_res.get("crag_decision", "accept")
+                        print(f"  [VERIFY r{round_n}] v2 CRAG={crag} "
+                              f"grounding={verify_res.get('grounding', 0):.3f} "
+                              f"({verify_res.get('n_claims', 0)} claims, "
+                              f"{verify_res.get('n_supported', 0)} supported) "
+                              f"in {time.time()-t_v:.1f}s")
+
+                        # Backward-compat for state.json (same schema as v1)
+                        verify_res["grounding"] = verify_res.get("grounding", 0.0)
+                        verify_res["n_citations"] = len(claims)
+                        verify_res["verdicts"] = []
+                        verify_res["weak_citations"] = verify_res.get("weak_citations", [])
+                        verify_res["weak_summary"] = verify_res.get("weak_summary", "")
+                        # Override grounding for CRAG gate
+                        use_grounding = verify_res.get("grounding", 0.0)
+                    except Exception as e:
+                        print(f"  [VERIFY v2] failed ({e}), falling back to v1", flush=True)
+                        verify_res = _research.verify.verify_section(
+                            content, ranked, model=_research.JUDGE_MODEL,
+                        )
+                        use_grounding = verify_res["grounding"]
+                else:
+                    verify_res = _research.verify.verify_section(
+                        content, ranked, model=_research.JUDGE_MODEL,
+                    )
+                    use_grounding = verify_res["grounding"]
+
                 rounds_log.append({
                     "round": round_n,
                     "grounding": verify_res["grounding"],
-                    "n_citations": verify_res["n_citations"],
+                    "n_citations": verify_res.get("n_citations", verify_res.get("n_claims", 0)),
                     "n_weak": len(verify_res["weak_citations"]),
                 })
                 print(f"  [VERIFY r{round_n}] grounding={verify_res['grounding']:.2f} "
@@ -1583,15 +1719,54 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 if best_round is None or _round_score(cand) > _round_score(best_round):
                     best_round = cand
 
-                if verify_res["grounding"] >= _research.MIN_GROUNDING:
-                    break
-                if round_n >= _research.MAX_RESEARCH_ROUNDS:
-                    break
-                hint_src = verify_res.get("weak_summary") or "previous draft had unsupported citations"
-                current_hint = (
-                    f"Previous draft's citations did not match their sources: {hint_src}. "
-                    "Bias query generation toward canonical / primary sources for the specific claims that failed."
-                )
+                # Track query/source IDs for overlap detection in next round
+                prior_query_sigs.update(q_sigs)
+                for s in raw_sources:
+                    if getattr(s, "id", ""):
+                        prior_source_ids.add(getattr(s, "id", ""))
+                    elif getattr(s, "url", ""):
+                        prior_source_ids.add(getattr(s, "url", ""))
+
+                # v2 CRAG gate: 3-way decision replaces binary g < 0.55
+                if _research.VFY_V2_AVAILABLE:
+                    crag = verify_res.get("crag_decision", "accept")
+                    if crag == "accept":
+                        print(f"  [CRAG r{round_n}] accept — grounding={verify_res.get('grounding', 0):.3f}")
+                        break
+                    elif crag == "incorrect":
+                        if round_n < _research.MAX_RESEARCH_ROUNDS:
+                            hint_src = verify_res.get("weak_summary") or "previous draft had unsupported citations"
+                            current_hint = (
+                                f"Previous draft had low grounding (g={verify_res.get('grounding', 0):.3f}). "
+                                f"Weak claims: {hint_src}. Rewrite queries for primary sources."
+                            )
+                            print(f"  [CRAG r{round_n}] incorrect → re-search")
+                            continue
+                        else:
+                            print(f"  [CRAG r{round_n}] incorrect (final round) — accept to avoid loop")
+                            break
+                    else:  # ambiguous
+                        if round_n < _research.MAX_RESEARCH_ROUNDS:
+                            hint_src = verify_res.get("weak_summary") or "some claims partially supported"
+                            current_hint = (
+                                f"Partial grounding (g={verify_res.get('grounding', 0):.3f}). "
+                                f"Weak claims: {hint_src}. Add specific queries for weak areas."
+                            )
+                            print(f"  [CRAG r{round_n}] ambiguous → blend search + rewrite")
+                            continue
+                        else:
+                            break
+                else:
+                    # v1 binary gate
+                    if use_grounding >= _research.MIN_GROUNDING:
+                        break
+                    if round_n >= _research.MAX_RESEARCH_ROUNDS:
+                        break
+                    hint_src = verify_res.get("weak_summary") or "previous draft had unsupported citations"
+                    current_hint = (
+                        f"Previous draft's citations did not match their sources: {hint_src}. "
+                        "Bias query generation toward canonical / primary sources for the specific claims that failed."
+                    )
             # Rank4: ship the BEST round, not whatever the loop happened to end on.
             if best_round is not None:
                 content = best_round["content"]; w = best_round["w"]
@@ -1601,6 +1776,23 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 if len(rounds_log) > 1:
                     print(f"  [BEST-ROUND] shipped grounding={verify_res['grounding']:.2f} "
                           f"({verify_res['n_citations']} cites) from the best of {len(rounds_log)} rounds")
+            # Lever 4 (Self-RAG-lite): scrub unsupported citations from the shipped content.
+            # Drops [N] markers rated 'unrelated' or 'no_evidence', keeps the claim.
+            if RESEARCH_AVAILABLE and verify_res:
+                try:
+                    scrubbed, n_scrubbed, abstain_note = (
+                        _research.verify.scrub_unsupported_citations(
+                            content, ranked, verify_res
+                        )
+                    )
+                    if n_scrubbed > 0:
+                        print(f"  [SELF-RAG] scrubbed {n_scrubbed} unsupported citation(s); "
+                              f"grounding improved from {verify_res['grounding']:.2f}")
+                        content = scrubbed
+                        if abstain_note:
+                            content += abstain_note
+                except Exception as e:
+                    print(f"  [SELF-RAG] scrub failed ({e}); keeping original content", flush=True)
         else:
             # No research layer -- straight gen as in legacy mode.
             target_words = compute_target_words(0, has_research=False)
@@ -1705,7 +1897,7 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         # surface them instead of them looking identical to good sections.
         _g = (verify_res or {}).get("grounding")
         _ncit = (verify_res or {}).get("n_citations", 0)
-        if sources_json and (_ncit == 0 or (_g is not None and _g < 0.45)):
+        if sources_json and (_ncit == 0 or (_g is not None and _g < _research.MIN_GROUNDING)):
             quality = "degraded"
         else:
             quality = "ok"

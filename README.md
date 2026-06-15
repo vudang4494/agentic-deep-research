@@ -1,42 +1,27 @@
 # agentic
 
-> **Local-first Agentic Deep Research platform.** Hand it a topic; it plans a
-> 12-chapter outline, runs ~100 atomic *research → write → verify* rounds, and
-> assembles a 300-400+ page, LaTeX-typeset technical book with a single
-> deduplicated References page — all on your laptop, no API key required.
+> **Local-first Agentic Deep Research platform.** Hand it a topic; it discovers the
+> outline from research, runs ~100 atomic *research → write → verify* rounds, and
+> assembles a 300-400+ page, LaTeX-typeset technical book with a single deduplicated
+> References page — all on your laptop, no API key required.
 
 <p align="left">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="python"  src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
   <img alt="runtime" src="https://img.shields.io/badge/runtime-Ollama-black.svg">
   <img alt="render"  src="https://img.shields.io/badge/render-tectonic%20%2F%20WeasyPrint-orange.svg">
-  <img alt="status"  src="https://img.shields.io/badge/status-stage%203%2B%20shipped-success.svg">
+  <img alt="status"  src="https://img.shields.io/badge/status-v3%20smoke--tested-success.svg">
 </p>
 
-Default stack is Ollama-served `gemma3:4b` (writer) + `qwen3.5:4b` (query gen
-+ judge) + `bge-m3` (embedder), with arXiv, Wikipedia, Tavily, Brave, and
-DuckDuckGo as research providers. Provider-agnostic — swap in any
-OpenAI-compatible endpoint.
+**Tiered model stack:**
 
-<p align="center">
-  <img src="pipeline.jpg" alt="Agentic Deep Research pipeline" width="640">
-  <br>
-  <em>End-to-end pipeline: planner → per-section research / write / verify loop → assemble & render.</em>
-</p>
+| Tier | Role | Model | Why |
+|------|------|-------|-----|
+| **Fast (research)** | QGN, VFY, RSR | `gemma4:e4b` | 12B dense, 6.4 GB, fast inference |
+| **Quality (writing)** | WRT, PLN, RVW | `batiai/qwen3.6-35b:iq3` | MoE 35B/3B, best prose quality |
+| Embedding | RSR rank | `bge-m3:latest` | dense retrieval |
 
----
-
-## Table of contents
-
-- [Highlights](#highlights)
-- [Quick start](#quick-start)
-- [Pipeline](#pipeline)
-- [CLI reference](#cli-reference)
-- [Environment variables](#environment-variables)
-- [File layout](#file-layout)
-- [How it stays grounded](#how-it-stays-grounded)
-- [Roadmap](#roadmap)
-- [License](#license)
+Providers: arXiv + Wikipedia + DDG. Provider-agnostic — swap in any OpenAI-compatible endpoint.
 
 ---
 
@@ -44,100 +29,137 @@ OpenAI-compatible endpoint.
 
 | Capability | What ships today |
 |---|---|
-| **Local-first** | Ollama-served LLMs only (default `gemma3:4b`, override via env) |
-| **Multi-provider retrieval** | arXiv + Wikipedia + Tavily + Brave + DDG, all gated by env |
-| **Full-text grounding** | top-2 sources per section get a 350-word body extract, not a 80-word snippet |
-| **Self-critique** | LLM-as-judge scores per-`[N]` citation grounding and triggers re-search |
-| **Iterative loop** | low-grounding sections re-query with reviewer hint, capped at 2 rounds |
-| **Concept memory** | every concept introduced is tracked; later sections see an "ALREADY DEFINED" prohibition list |
-| **Outline planning** | `--topic "..."` triggers a research-grounded outline generator |
-| **Citation hygiene** | strips `[N>max]` orphans, denies zero-citation gaming, prefilters noisy domains |
-| **LaTeX-quality PDF** | renders via `tectonic` (paper-quality math) with WeasyPrint fallback |
+| **True Deep Research (v3)** | Outline emerges from evidence, not pre-planned |
+| **Local-first** | Ollama-served LLMs only (tiered: gemma-4 research + qwen3.6 writer) |
+| **Multi-provider retrieval** | arXiv + Wikipedia + DDG, all gated by env vars |
+| **Full-text grounding** | top-2 sources per section get a 350-word body extract |
+| **Self-critique** | HHEM-as-judge scores per-`[N]` citation grounding and triggers re-search |
+| **Iterative loop** | low-grounding sections re-query with hint, capped at 2 rounds |
+| **Concept discovery** | every section discovers new concepts; outline can grow dynamically |
+| **LaTeX-quality PDF** | renders via `tectonic` with WeasyPrint fallback |
 | **Resume-safe** | per-section state checkpoint, autonomous watchdog with Ollama health checks |
 
-See [WORKPLAN.md](WORKPLAN.md) for the full roadmap (stages 0 → 5) and architecture notes.
+See [WORKPLAN.md](WORKPLAN.md) for roadmap and architecture notes.
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Install Ollama + pull the default model stack
+# 1. Install Ollama + pull models
 brew install ollama
 ollama serve &
-ollama pull gemma3:4b      # writer (default)
-ollama pull qwen3.5:4b     # query generator + citation judge
-ollama pull bge-m3         # embedder for ranking + filtering
+ollama pull gemma4:e4b     # fast research model (QGN, VFY)
+ollama pull batiai/qwen3.6-35b:iq3  # best prose model (WRT, PLN)
+ollama pull bge-m3:latest            # embedder
 
 # 2. Python deps
 pip install -r files/requirements.txt
 brew install pandoc tectonic    # tectonic for paper-quality LaTeX PDF render
 
-# 3. (optional) configure web-search keys
+# 3. (optional) web-search keys
 cp .env.example .env
-# fill in TAVILY_API_KEY and/or BRAVE_API_KEY — pipeline degrades gracefully without
+# fill in TAVILY_API_KEY -- pipeline degrades gracefully without
 
-# 4. Run
-./run.sh             # autonomous runner (writes book.{md,html,pdf})
-./run.sh direct      # single pass, no watchdog
-./run.sh review      # autonomous + LLM-as-judge review pass
-./run.sh watch       # live monitor
+# 4. Run v3 (outline-from-research, smoke test: 2 chapters)
+python3 files/deep_research_v3.py --topic "Diffusion Models" --out-name diffusion_v3
 
-# 5. Spawn a custom-topic book
-python3 files/deep_research.py --topic "Diffusion Models for Image Generation" \
-  --n-chapters 12 --n-passes 10 --out-name diffusion_book --review
+#    or full run (all chapters)
+python3 files/deep_research_v3.py --topic "Diffusion Models" \
+  --out-name diffusion_v3 --no-smoke
+
+#    or v2 (pre-planned outline, shipped)
+./run.sh
+
+# 5. Kill
+pkill -f files/runner.py && pkill -f files/deep_research.py
 ```
 
-Outputs land in `files/output/` as `book.{md,html,pdf}` (plus `state.json`,
-`report.json`, and timestamped logs).
+Each run lands in `files/output/runs/<out-name>/` as `book.{md,pdf}` (plus `state.json`,
+`topic_profile.json`, `outline_profile.json`, and logs).
 
 ---
 
-## Pipeline
+## Pipeline v3 (outline-from-research)
 
 ```
-                 .------------------------------------------------------.
-  topic str ---> | Planner agent  (qwen3.5:4b + scoping research)       |  Stage 3
-                 |   scoping_search (arxiv + wiki + tavily)             |
-                 |   -> 12-chapter outline JSON (self-corrected)        |
-                 '----------------------------+-------------------------'
-                                              | CHAPTERS[]
-                                              v
-                 .------------------------------------------------------.
-  per section -> | (1) Query generator       (qwen3.5:4b)               |  Stage 2
-                 |     prompt -> 3-5 search queries (JSON)              |
-                 | (2) Multi-provider search (tavily/brave/arxiv/wiki)  |
-                 |     -> raw sources                                   |
-                 | (3) Prefilter             (bge-m3 cosine + domain    |
-                 |                            noise threshold)          |
-                 | (4) Rank top-k            (bge-m3)                   |
-                 | (5) Full-text enrich      (trafilatura, top-2 only)  |
-                 |     -> EVIDENCE block                                |
-                 | (6) Writer                (gemma3:4b -- configurable)|
-                 |     + context block (continuity + concepts already   |
-                 |       defined cross-chapter, "DO NOT redefine")      |
-                 |     -> section markdown with [N] citations           |
-                 | (7) Sanitize + math normalize + clean_citations      |
-                 |     (strip H1/H2 / refs / orphan [N>max])            |
-                 | (8) LLM-as-judge per-citation verify (qwen3.5:4b)    |
-                 |     supports / partial / unrelated / contradicts     |
-                 |     -> grounding score 0..1                          |
-                 |        zero citations + sources -> grounding 0.0     |
-                 |        (denies the "writer gaming" pathology)        |
-                 | (9) If grounding < 0.55 AND round < 2:               |
-                 |       re-query with reviewer hint -> back to (2)     |
-                 |     else persist sources + queries + concepts        |
-                 '----------------------------+-------------------------'
-                                              v
-                 .------------------------------------------------------.
-  assemble    -> | book.md = sanitized sections + dedup'd References    |  Stage 1
-                 | render = pandoc + tectonic (LaTeX) -> book.pdf       |
-                 '------------------------------------------------------'
+Topic
+  │
+  v
+.------------------------------------------------------.
+| Stage 0: DISCOVER  (gemma-4-12b)                     |
+|   3 broad scoping queries -> ~20 sources              |
+|   -> LLM synthesizes TopicProfile                   |
+'------------------------------------------------------'
+  │
+  v
+.------------------------------------------------------.
+| Stage 1: OUTLINE FROM RESEARCH                        |
+|   LLM reads gathered sources -> hierarchical outline |
+|   (outline is an OUTPUT, not INPUT)                  |
+'------------------------------------------------------'
+  │
+  v
+.------------------------------------------------------.
+| Stage 2: INVESTIGATE  (per section)                 |
+|   (1) QGN -> 3-5 search queries                      |
+|   (2) RSR gather (arxiv/wiki/ddg)                   |
+|   (3) Rank top-k (RRF + RRK)                        |
+|   (4) Full-text enrich (top-2, 350w)                |
+|   (5) WRT -> markdown with [N] citations            |
+|   (6) VFY (HHEM grounding)                          |
+|   (7) if g < 0.55: retry with refined queries       |
+'------------------------------------------------------'
+  │
+  v
+.------------------------------------------------------.
+| Stage 3: ASSEMBLE -> book.md -> PDF                  |
+'------------------------------------------------------'
+```
+
+---
+
+## Pipeline v2 (pre-planned outline)
+
+```
+topic str ---> Planner agent (batiai/qwen3.6-35b:iq3 + scoping research)
+                 -> 12-chapter outline JSON (self-corrected)
+                 -------------------------------------------------------
+per section -> (1) QGN -> 3-5 search queries (JSON)
+               (2) Multi-provider search (arxiv/wiki/ddg)
+               (3) Prefilter (bge-m3 cosine + domain noise)
+               (4) Rank top-k (RRF + RRK cross-encoder)
+               (5) Full-text enrich (top-2, 350w)
+               (6) Writer (batiai/qwen3.6-35b:iq3)
+               (7) Sanitize + math normalize + clean_citations
+               (8) VFY (HHEM grounding)
+               (9) if g < 0.55 AND round < 2: re-query -> back to (2)
+                 -------------------------------------------------------
+assemble -> book.md + dedup'd References -> PDF (tectonic)
 ```
 
 ---
 
 ## CLI reference
+
+### v3 (outline-from-research)
+
+```bash
+python3 files/deep_research_v3.py [OPTIONS]
+```
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--topic` | required | Research topic |
+| `--out-name` | from topic | Output folder name |
+| `--n-chapters N` | 12 | Number of chapters |
+| `--sections-per-chapter N` | 8 | Sections per chapter |
+| `--providers arxiv wikipedia ddg` | all 3 | Research providers |
+| `--max-rounds N` | 2 | Max research rounds per section |
+| `--no-smoke` | smoke (2 ch) | Run full pipeline |
+| `--render` | off | Generate PDF |
+
+### v2 (pre-planned outline)
 
 ```bash
 python3 files/deep_research.py [OPTIONS]
@@ -145,17 +167,15 @@ python3 files/deep_research.py [OPTIONS]
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `--batch N` | 2 | Reserved for parallel section generation (future) |
+| `--topic "..."` | hardcoded LLM outline | Stage 3 planner generates outline |
+| `--n-chapters N` | 12 | Number of chapters |
+| `--n-passes N` | 8 | Sections per chapter |
 | `--start-ch N` | 1 | Resume from chapter N |
-| `--start-pp N` | 1 | Resume from section N within that chapter |
-| `--end-ch N` | none | Stop after chapter N (use `--start-ch 1 --end-ch 1` for a smoke test) |
-| `--review` | off | LLM-as-judge prose review on top of grounding verification |
-| `--no-render` | render on | Skip PDF rendering at end |
-| `--no-research` | research on | Disable Stage 2 (use only the writer's pretrained knowledge) |
-| `--topic "..."` | hardcoded LLMs outline | Stage 3 planner generates a fresh outline |
-| `--n-chapters N` | 12 | Number of chapters (with `--topic`) |
-| `--n-passes N` | 8 | Sections per chapter (use 10-11 to target >400 pages) |
-| `--out-name X` | book | Output basename: produces `X.{md,html,pdf,state.json,...}` |
+| `--start-pp N` | 1 | Resume from section N |
+| `--end-ch N` | none | Stop after chapter N |
+| `--review` | off | LLM-as-judge prose review |
+| `--no-render` | render on | Skip PDF |
+| `--out-name X` | book | Run name |
 
 ---
 
@@ -164,12 +184,8 @@ python3 files/deep_research.py [OPTIONS]
 | Variable | Effect |
 |---|---|
 | `TAVILY_API_KEY` | Enable Tavily web search (free 1000/mo at tavily.com) |
-| `BRAVE_API_KEY` | Enable Brave Search fallback (free 2000/mo at brave.com/search/api/) |
-| `DEEP_RESEARCH_WRITER_MODEL` | Override writer model (default `gemma3:4b`) |
-| `DEEP_RESEARCH_REVIEW=1` | Enable review pass (equivalent to `--review`) |
-| `DEEP_RESEARCH_TOPIC` | Topic for planner (equivalent to `--topic`) |
-| `DEEP_RESEARCH_N_CHAPTERS` / `DEEP_RESEARCH_N_PASSES` | Outline shape |
-| `DEEP_RESEARCH_OUT_NAME` | Output basename |
+| `DEEP_RESEARCH_WRITER_MODEL` | Override writer model |
+| `DEEP_RESEARCH_REVIEW=1` | Enable review pass |
 | `DEEP_RESEARCH_END_CH` | Stop after this chapter |
 
 ---
@@ -177,71 +193,62 @@ python3 files/deep_research.py [OPTIONS]
 ## File layout
 
 ```
-agentic/
-├── run.sh                       # default-config launcher
-├── watch.sh                     # one-shot progress snapshot
-├── scripts/
-│   └── launch_book2.sh          # example: Stage 3+ full run with review
-├── README.md  CLAUDE.md  WORKPLAN.md  HANDOFF.md  LICENSE
-├── .env.example                 # all env vars documented
-├── .mcp.json                    # MCP server config (Claude Code reads at root)
-├── pipeline.jpg                 # architecture diagram
-└── files/
-    ├── deep_research.py         # main pipeline (writer + assemble + render)
-    ├── runner.py                # autonomous watchdog
-    ├── monitor.py               # progress CLI
-    ├── mcp_server.py            # MCP server (configured at root via .mcp.json for Claude Code)
-    ├── requirements.txt
-    ├── mcp_requirements.txt
-    ├── archive/                 # legacy pipelines kept for historical reference
-    ├── research/                # Stage 2+/3 agentic layer
-    │   ├── __init__.py
-    │   ├── types.py             # Source, Query dataclasses
-    │   ├── search.py            # tavily / brave / arxiv / wiki / ddg adapters
-    │   ├── query_gen.py         # section prompt -> search queries (JSON, qwen3.5:4b)
-    │   ├── notes.py             # dedup / prefilter / rank / enrich / format EVIDENCE
-    │   ├── embeddings.py        # bge-m3 batched + cosine sim
-    │   ├── fetch.py             # disk-cached HTTP fetcher + full-text extraction
-    │   ├── verify.py            # per-[N] grounding judge (qwen3.5:4b)
-    │   ├── planner.py           # topic -> outline JSON + self-correction
-    │   └── cache/               # HTTP fetch cache (gitignored)
-    └── output/                  # all generated artifacts (gitignored)
+files/
+├── deep_research.py          # v2: pre-planned outline (shipped)
+├── deep_research_v3.py      # v3: outline-from-research (smoke tested)
+├── runner.py               # watchdog + auto-restart
+├── monitor.py              # progress CLI
+├── research/               # research layer
+│   ├── discovery.py        # v3: topic scoping
+│   ├── outline_from_research.py  # v3: outline from evidence
+│   ├── deep_investigate.py      # v3: per-section research
+│   ├── search.py          # provider adapters (arxiv/wiki/ddg/tavily)
+│   ├── query_gen.py       # query generator
+│   ├── notes.py           # RRF rank + format evidence
+│   ├── embeddings.py      # bge-m3 batched + cosine
+│   ├── fetch.py           # disk-cached HTTP fetcher
+│   ├── verify.py          # VFY (grounding judge)
+│   ├── faithfulness.py    # HHEM v2 grounding
+│   ├── rerank.py          # RRK cross-encoder
+│   ├── planner.py         # PLN (v2 outline generator)
+│   └── types.py           # Source + Query dataclasses
+├── eval/                  # evaluation
+│   ├── paper_eval.py      # paper-quality eval
+│   └── reports/           # eval outputs (gitignored)
+├── memory/                # agent memory
+│   ├── short-memory.md    # version changelog
+│   └── long-memory.md     # session journal
+└── output/
+    └── runs/<name>/       # per-run output (gitignored)
 ```
 
 ---
 
 ## How it stays grounded
 
-The fragile parts of "agentic" pipelines are usually:
-
-1. **Citation gaming** — writer LLMs learn that "no citations = no failed verifications = perfect score"
-   and drop all `[N]` markers. We deny zero-citation sections with `grounding = 0.0` when evidence was
-   provided, forcing the writer to either cite or hedge.
-2. **Source noise** — web search APIs occasionally surface tangential domains (YouTube transcripts,
-   social-media histories, vendor marketing). A bge-m3 cosine prefilter drops anything below 0.30
-   similarity, with a stricter 0.55 threshold for noisy-domain hits.
-3. **Off-by-one citations** — writers sometimes emit `[9]` when only 8 sources were provided.
-   `clean_citations()` strips these post-write before they reach the verifier.
-4. **Binary content leakage** — full-text fetchers can return PDF/zip bytes that look like text.
-   `_looks_binary()` checks content-type + magic bytes (`%PDF`, `PK\x03\x04`) + control-char ratio.
-5. **Concept repetition across chapters** — without a global memory, agents redefine "attention" in
-   every chapter that touches it. We extract every concept introduced (H3/H4 headers + bold terms)
-   and emit a chapter-keyed "ALREADY DEFINED" prohibition list into each later section's prompt.
+1. **Zero-citation penalty** — `grounding = 0.0` when evidence was provided but no `[N]`
+   markers are emitted, forcing the writer to cite or hedge.
+2. **HHEM v2 grounding** — each `[N]` claim fed to vectara/hallucination_evaluation_model
+   (flan-t5-base); returns supports/partial/contradicts/unrelated.
+3. **Source noise** — bge-m3 cosine prefilter drops anything below 0.30 similarity,
+   stricter 0.55 for noisy-domain hits.
+4. **RRF + RRK** — Reciprocal Rank Fusion (sparse BM25 + dense cosine) followed by
+   cross-encoder reranking for top-8 candidates.
+5. **Off-by-one citations** — `clean_citations()` strips `[N>max]` orphans post-write.
 
 ---
 
 ## Roadmap
 
-| Stage | What | Status |
-|---|---|---|
-| 0 | Atomic-call book generator (96 hardcoded sections) | shipped |
-| 1 | Continuity context + LLM-as-judge prose review + sanitization | shipped |
-| 2 | Researcher layer (search + retrieval + grounded citations) | shipped |
-| 2+ | Tavily + full-text + verifier + iterative loop + zero-cite penalty | shipped |
-| 3 | Planner agent (topic → outline) + self-correction | shipped |
-| 3+ | Cross-section concept tracker + outline dedupe directives | shipped |
-| 4 | Multi-agent orchestration (Researcher / Writer / Reviewer split, parallel sections) | in progress |
-| 5 | Citation-graph following + second-hop retrieval | planned |
+| Stage | Description | Status |
+|-------|-------------|--------|
+| 0-1 | Atomic generator + continuity + reviewer | shipped |
+| 2 | Researcher layer (search + retrieval + citations) | shipped |
+| 2+ | Tavily + full-text + verifier + iterative loop | shipped |
+| 3 | Planner agent + outline self-correction | shipped |
+| **v3** | **True Deep Research (outline from evidence)** | **smoke tested** |
+| 4 | Multi-agent split (parallel sections) | planned |
+| 5 | Citation-graph + second-hop retrieval | planned |
 
 ---
 
