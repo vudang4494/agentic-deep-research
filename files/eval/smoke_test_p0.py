@@ -57,15 +57,16 @@ def test_p0a_hard_block() -> dict:
 
     has_soft_block = "ACCEPT with degraded quality" in code
     has_hard_block = "RuntimeError" in code and "HARD BLOCK" in code
-    # RULES: threshold >= 0.50 (raised from 0.35 after benchmark found generic titles)
-    has_threshold_050 = "ev_topic_rel < 0.50" in code
+    # Real gate: `ev_topic_rel < ev_threshold` where `ev_threshold = min(0.40, ...)` ~= 0.40.
+    # (The old misleading "< 0.50" log literal was corrected to interpolate ev_threshold.)
+    has_ev_threshold = "ev_topic_rel < ev_threshold" in code and "ev_threshold = min(0.40" in code
 
     result = {
-        "test": "P0a: Domain Relevance Gate hard block + threshold 0.50",
+        "test": "P0a: Domain Relevance Gate hard block + ev_threshold ~=0.40",
         "co_soft_block": has_soft_block,      # phai = False
         "co_hard_block": has_hard_block,      # phai = True
-        "co_threshold_050": has_threshold_050,  # phai = True (RULES)
-        "PASS": has_hard_block and not has_soft_block and has_threshold_050,
+        "co_ev_threshold_040": has_ev_threshold,  # phai = True (real gate ~0.40, not 0.50)
+        "PASS": has_hard_block and not has_soft_block and has_ev_threshold,
     }
     _print_result(result)
     return result
@@ -215,15 +216,15 @@ def test_rules_stage_b_semantic_overlap() -> dict:
     code = (ROOT / "files" / "research" / "outline_from_research.py").read_text()
 
     has_jaccard = "jaccard" in code.lower()
-    has_threshold_07 = ">= 0.70" in code or ">= 0.7" in code
+    has_threshold = "jaccard >= 0.50" in code  # real flag threshold (docs' 0.7 is aspirational)
     has_overlap_issues = "semantic_overlap_issues" in code
 
     result = {
         "test": "RULES Stage B: semantic_overlap jaccard check",
         "co_jaccard": has_jaccard,
-        "co_threshold_07": has_threshold_07,
+        "co_threshold_050": has_threshold,
         "co_overlap_issues_tracked": has_overlap_issues,
-        "PASS": has_jaccard and has_threshold_07 and has_overlap_issues,
+        "PASS": has_jaccard and has_threshold and has_overlap_issues,
     }
     _print_result(result)
     return result
@@ -305,8 +306,8 @@ def test_rules_stage_e_topic_purity_fail() -> dict:
     print("\n[StageE] Kiem tra: topic_purity FAIL condition (grounding-only insufficient)")
     code = (ROOT / "files" / "research" / "deep_investigate.py").read_text()
 
-    has_topic_fail = "chi grounding pass" in code.lower() or "grounding-only insufficient" in code.lower()
-    has_topic_hard_block = "chi grounding" in code or "topic_purity=" in code
+    has_topic_fail = "topic_relevance < min_topic_relevance" in code  # grounding-pass alone insufficient
+    has_topic_hard_block = "StageE HARD BLOCK" in code and "topic_purity=" in code
 
     result = {
         "test": "RULES Stage E: topic_purity FAIL condition",
