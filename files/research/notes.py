@@ -458,7 +458,6 @@ def check_evidence_domain(
     must_cover_terms: List[str],
     avoid_terms: List[str],
     model: str = "gemma4:e4b",
-    min_relevance: float = 0.50,
 ) -> dict:
     """Gate: does the evidence pool match the section's domain?
 
@@ -473,9 +472,9 @@ def check_evidence_domain(
         must_cover_terms: terms the section must address
         avoid_terms: terms the section should avoid
         model: judge model for LLM-based scoring
-        min_relevance: gate threshold; below this triggers retry
 
     Returns:
+        (gate threshold lives at the call site: deep_investigate.py ev_threshold ~= 0.40)
         dict: {topic_relevance: float [0,1], verdict: str, reason: str, score_breakdown: dict}
     """
     if not sources:

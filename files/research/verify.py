@@ -239,7 +239,8 @@ def verify_section(
           "weak_summary": str  -- aggregated reason string for re-research feedback
         }
 
-    Empty/no-citation sections get grounding=1.0 (nothing to verify).
+    No-citation sections WITH sources score grounding=0.0 (writer dropped all citations);
+    only sections with neither [N] markers nor sources score 1.0.
     """
     # ---- Step 1: extract all [N] markers ----
     markers: List[Tuple[int, int]] = []

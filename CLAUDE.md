@@ -31,23 +31,28 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 | 1 | Outline (OUT) | `research/outline_from_research.py` | chapters/sections TỪ evidence; `outline_audit` (advisory) |
 | 2 | Deep Investigation | `research/deep_investigate.py` | vòng lặp per-section `max_rounds` (CLI=3, run_v3 nội bộ=2) |
 | 2a | Query Gen (QGN) | `research/query_gen.py` + `query_router.py` | LLM khi có `domain_context`, else archetype |
-| 2b | Search (RSR) | `research/search.py` | providers: arxiv, wikipedia, tavily, ddg |
+| 2b | Search (RSR) | `research/search.py` | providers: arxiv, wikipedia, ddg (default); tavily chỉ khi `TAVILY_API_KEY` set |
 | 2c | Rerank (RRK) | `research/rerank.py` | `bge-reranker-v2-m3` (transformers, KHÔNG Ollama) |
 | 2d | Rank + Gate | `research/notes.py` | RRF(BM25+cosine) + **P0a** domain gate + **P0c** seen-penalty + prefilter |
 | 2e | Writer (WRT) | `deep_investigate.py` (inline) | `qwen3.6-35b:iq3` |
 | 2f | Grounding (VFY) | `research/faithfulness.py` | HHEM v2 |
-| 2g | Topic / Cross-ref | `research/verify.py` | judge `gemma4:e4b` |
+| 2g | Topic / Cross-ref | `research/verify.py` | topic = HEURISTIC term-overlap (KHÔNG LLM) → quantized {0.5,0.75,1.0}; cross-ref = string match |
 | 3 | Assemble | `deep_research_v3.py` | book.md + math/heading hygiene (Stage F) |
 | 4 | Render `--render` | `files/scripts/render_book.py` | book.pdf / book.html |
 
 Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`.
+
+**Verify layer — LIVE vs LEGACY (đừng sửa nhầm):**
+- **LIVE** (chạy trong `investigate_section`, `deep_investigate.py:~606-740`): `faithfulness.grounding_score` (HHEM) + `verify.topic_relevance_check` (HEURISTIC, KHÔNG LLM) + `verify.verify_cross_references_v2` (regex đếm).
+- **LEGACY-only** (chỉ `deep_research.py`/scripts/eval gọi — ĐỪNG sửa như live): `verify_section`, `verify_section_v2`, `crag_decision`, `answer_relevance`, `strip_refine`, `scrub_unsupported_citations`.
+- Đổi accept/grounding → sửa `deep_investigate.py:606-740`, **KHÔNG** sửa `crag_decision`/`verify_section_v2` (no-op với run thật).
 
 ## 4. Model stack (THẬT)
 | Vai trò | Model |
 |---------|-------|
 | Discovery / Outline / Query-Gen / Judge | `gemma4:e4b` |
 | Writer | `batiai/qwen3.6-35b:iq3` |
-| Embed (retrieval + verify) | `bge-m3:latest` — ⚠️ `config.py` ghi `nomic-embed-text`: **DRIFT đã biết**, code thật dùng bge-m3 |
+| Embed | **SPLIT**: retrieval (notes.rank/prefilter RRF) + query_router chạy `nomic-embed-text` runtime (`investigate_section` default `deep_investigate.py:214`, orchestrator KHÔNG override). `bge-m3:latest` CHỈ ở verify-side (`verify.py:35`) + default `embeddings.py`. config nomic KHỚP path retrieval (≠ pure drift) |
 | Rerank | `BAAI/bge-reranker-v2-m3` (transformers) |
 | Grounding | `vectara/hallucination_evaluation_model` (HHEM v2) |
 
@@ -65,12 +70,12 @@ Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.p
 
 ## 6. 8 Guardrails — tránh đi sai hướng product/process
 1. **Output goal > volume.** Đây là technical book đúng-topic, grounded, auditable — KHÔNG phải máy sinh chữ. Run 700 trang mà drift/lặp = **FAIL**. Đừng tối ưu section/word/completion trước topic purity & non-redundancy.
-2. **Grounding KHÔNG phải chất lượng.** Run v36: `g=1.0` toàn bộ 280 section → HHEM bão hòa, vô nghĩa làm tín hiệu. Tín hiệu thật = `topic_relevance`. Đừng green-light run chỉ vì grounding.
+2. **Grounding KHÔNG phải chất lượng.** Run v36: `g=1.0` toàn bộ 280 section → HHEM bão hòa (gộp mega-premise), vô nghĩa làm tín hiệu. Tín hiệu thật = `topic_relevance` — NHƯNG nó là heuristic thô lượng tử hóa {0.5,0.75,1.0} (`verify.py:342`, KHÔNG LLM), chỉ là proxy. Đừng green-light run chỉ vì grounding.
 3. **Outline EMERGE từ evidence — GIẾT matrix pattern.** Không pre-template chapters×concepts. Nếu `outline_audit` trả `ok=false` (matrix/coherence/overlap) → **sửa OUTLINE trước Stage 2**, không vá ở writer.
 4. **Fix ở GATE, không ở writer.** Drift / off-topic evidence / canonical thiếu / nguồn dominate phải chặn ở P0a/P0b/P0c/prefilter (`notes.py`, `deep_investigate.py`). Không cho writer "cứ viết rồi tính".
 5. **Canonical papers được PROTECT, không penalize.** `protected_source_ids` bypass cosine prefilter + EXEMPT khỏi P0c. Mọi thay đổi retrieval/dedup phải giữ exemption này (nếu mất → canonical recall sụp về 0).
 6. **Enforce reference relevance theo SECTION.** Canonical recall cao che giấu sourcing kém per-section (~45% ref off-topic ở v36). Siết prefilter/domain gate; không accept section chỉ vì có ≥6 citation.
-7. **Ngưỡng sống trong CODE, doc là advisory.** Đừng quote số trong doc làm fact — đọc `config.py` / `deep_investigate.py` / `notes.py` / `verify.py`.
+7. **Ngưỡng sống trong CODE, doc là advisory.** Đừng quote số trong doc làm fact — đọc `config.py` / `deep_investigate.py` / `notes.py` / `verify.py`. *Lưu ý:* `product_quality_verifiers.py` là eval-time-only, KHÔNG chạy trong pipeline; đừng coi GATE-0..6 trong đó là đang bảo vệ run.
 8. **Một nguồn sự thật pipeline.** Orchestrator = `deep_research_v3.py`; mọi stage logic = `files/research/*.py`. `files/deep_research.py` là legacy v2 — đừng sửa nó như đang live. Memory gọn (short ≤50 dòng, long <200).
 
 ## 7. Lệnh thường dùng

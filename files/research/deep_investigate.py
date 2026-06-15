@@ -447,7 +447,8 @@ def investigate_section(
         # Check that the evidence pool actually matches the section's domain before writing.
         # This is the primary defense against rlhf_v3-style failures where evidence returns
         # from an entirely wrong domain (e.g., RAG papers for an RLHF section).
-        # Gate uses the same topic_relevance_check() from verify.py but against evidence titles.
+        # Gate uses notes.check_evidence_domain() (keyword overlap + optional gemma judge over
+        # evidence titles/excerpts) -- distinct from the post-writer verify.topic_relevance_check on prose.
         if not ranked:
             if round_n < max_rounds:
                 current_hint = (
@@ -473,9 +474,9 @@ def investigate_section(
         ev_topic_rel = float(ev_check.get("topic_relevance", 0.0))
         ev_reason = ev_check.get("reason", "")
         print(f"  [R{round_n}] Evidence domain gate: rel={ev_topic_rel:.3f} ({ev_reason[:80]})")
-        # P0a gate threshold: defaults to 0.50 but respects override.
-        # The 'min_topic_relevance' arg is also used for the writer's final accept check;
-        # the evidence-domain gate uses 0.40 to allow marginal-but-acceptable cases.
+        # P0a evidence-domain gate threshold = ev_threshold = min(0.40, max(0.30, min_topic_relevance-0.10))
+        # ~= 0.40 with default min_topic_relevance=0.50. NOTE: min_topic_relevance(0.50) is the SEPARATE
+        # writer-accept bar (see accept check below); the evidence gate is intentionally looser (~0.40).
         ev_threshold = min(0.40, max(0.30, min_topic_relevance - 0.10))
         if ev_topic_rel < ev_threshold:
             if round_n < max_rounds:
@@ -496,7 +497,7 @@ def investigate_section(
                 # Mark as blocked so the run can be audited and retried with correct queries.
                 raise RuntimeError(
                     f"[P0a HARD BLOCK] Section '{spec.title}' blocked: "
-                    f"topic_relevance={ev_topic_rel:.3f} < 0.50 after {max_rounds} rounds. "
+                    f"topic_relevance={ev_topic_rel:.3f} < {ev_threshold:.2f} after {max_rounds} rounds. "
                     f"Evidence domain mismatch: {ev_reason}. "
                     f"Section requires retry with correct domain queries. "
                     f"DO NOT write -- mark as BLOCKED."

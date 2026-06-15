@@ -11,6 +11,18 @@
 
 ## Session log (mới nhất trước)
 
+### [2026-06-16] Audit + tối ưu tầng Verify; đính chính embed claim
+- **Bối cảnh:** Re-check công việc chuẩn hóa + duyệt cấu trúc Verify (nhiễu/lỗi thời); chuẩn hóa cả Claude-agent docs lẫn product.
+- **Phát hiện:**
+  - **Đính chính embed:** docs trước claim "code dùng bge-m3, config nomic=drift" là SAI → SPLIT: retrieval+query_router=`nomic-embed-text` (runtime), verify-side=`bge-m3` (`verify.py:35`); config nomic khớp retrieval.
+  - **Nhiễu verify:** message P0a in "< 0.50" nhưng enforce ≈0.40; `topic_relevance_check` nhận `model=` nhưng KHÔNG gọi LLM → heuristic quantized {0.5,0.75,1.0}; grounding bão hòa (gộp mega-premise); `check_evidence_domain(min_relevance=0.50)` = param chết.
+  - **Dead/legacy:** 6/8 hàm `verify.py` chỉ `deep_research.py`/scripts/eval gọi, KHÔNG live v3.
+  - **Bug tiềm ẩn:** `faithfulness.py:183` except-fallback NameError; cross-ref 3 chỗ gate chồng + bug ngưỡng `:583` (flat min thay vì rule động).
+- **Thay đổi (APPLY-NOW, 0 đổi hành vi):** code: message `:499`→in `ev_threshold`, comment `:450/:476`, xoá param chết `notes.py:461`, docstring `verify.py:242`. docs: GLOSSARY (0.60→0.40, grounding saturation, topic heuristic, embed split), CLAUDE/RULES (embed split, providers, topic heuristic, bản đồ Verify LIVE/LEGACY, target G0-G6), short-memory.
+- **Còn lại (cần test/confirm):** de-saturate grounding (per-citation), thay topic heuristic bằng judge thật, wire citation-integrity G2 + cross-ref accuracy G4, gộp 3 cross-ref gate + fix bug `:583`, fix NameError `faithfulness.py:183`, unify embed model.
+
+---
+
 ### [2026-06-15] Đánh giá llm_book_v36 + chuẩn hóa docs/cleanup
 - **Bối cảnh:** Hoàn thành book v36 (712 trang); audit chất lượng + chuẩn hóa CLAUDE/RULES/memory cho khớp code thật; dọn file lạc mục tiêu.
 - **Phát hiện chính:**
@@ -18,7 +30,7 @@
   - **Matrix pattern còn sống:** outline templated (35 anchor × 8 section); RAG/CoT bị tách 2 anchor; jaccard ~0.80 giữa section gần-trùng. `outline_audit` `ok=false` nhưng chỉ advisory → redundancy lọt. (FIX_SUMMARY/DEVELOPMENT_SUMMARY claim "fixed=0" là OVER-CLAIM.)
   - **~45% reference off-topic** (laser/MHD/QFT...) do prefilter 0.45 + domain gate ~0.40 quá lỏng cho chapter theme-generic.
   - **Doc drift nặng:** CLAUDE/short-memory ghi v3.4/v3.5, "32 section/19K từ/4 canonical", module ở `files/*.py`, P0a=0.60/0.80 — ĐỀU SAI. Thật: deep_research_v3.py + `files/research/*.py`, 280 section, 12 canonical, P0a≈0.40, grounding accept 0.70, topic 0.50.
-  - **Config drift:** `config.py EMBED_MODEL=nomic-embed-text` nhưng code thật dùng `bge-m3:latest`.
+  - **Embed SPLIT (đính chính 06-16):** retrieval+query_router chạy `nomic-embed-text`, verify-side `bge-m3`. config nomic KHỚP path retrieval — KHÔNG phải pure drift.
 - **Thay đổi đã làm:**
   - Viết lại `CLAUDE.md` (pipeline 12-stage thật + 8 guardrails + ngưỡng code), `RULES.md` (bảng OPERATIVE vs TARGET), `short-memory.md` (snapshot v36), `long-memory.md` (de-dup entry 06-08).
   - Xoá cruft (~4MB): `cv_*_run.log`, `.DS_Store`, `danhgia/` rỗng, `*.bak`/`*.prepolish` (v36), tất cả `__pycache__`.
