@@ -97,4 +97,4 @@ pkill -f files/deep_research_v3.py       # dừng
 ```
 
 ## 8. Trạng thái hiện tại
-Xem `files/memory/short-memory.md`. Tóm tắt: run mới nhất = **`llm_book_v36`** (40 chương / 280 section / ~196K từ state.json / 712 trang PDF; `g=1.0` toàn bộ; `topic_relevance` mean 0.78, 23 section ở sàn 0.50; 12/12 canonical injected). Blocker mở: matrix pattern + reference off-topic (Guardrail 3 & 6).
+Xem `files/memory/short-memory.md`. **Base** = orchestrator `deep_research_v3.py` + research layer, gồm: verify G2/G3/G4 (tín hiệu phân biệt thật, LOCAL-only, **Verifier≠Writer**), outline anti-matrix (#1), embed `bge-m3` thống nhất (#3), anchoring an-toàn KHÔNG-mất-nguồn (#5), citation-aware grounding warn-first (#4), dedup G6. Đã validated + push. `llm_book_v36` là book CŨ (sinh bởi code trước cải tiến) — chỉ tham khảo lịch sử, KHÔNG phải trạng thái base.
