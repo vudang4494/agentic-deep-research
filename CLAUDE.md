@@ -46,6 +46,7 @@ Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.p
 - **LIVE** (chạy trong `investigate_section`, `deep_investigate.py:~580-740`): `faithfulness.grounding_score` (HHEM, **G3** de-saturated) + `verify.topic_relevance_check` (**G4**: blend heuristic + `answer_relevance` gemma LOCAL) + `verify.verify_section` (**G2** citation-integrity, cite_precision ≥0.45 fail-open, `:686`) + `verify.verify_cross_references_v2` (regex đếm).
 - **LEGACY-only** (chỉ `deep_research.py`/scripts/eval gọi — ĐỪNG sửa như live): `verify_section_v2`, `crag_decision`, `strip_refine`, `scrub_unsupported_citations`. (`verify_section` + `answer_relevance` GIỜ dùng LIVE bởi G2/G4.)
 - Đổi accept/grounding → sửa `deep_investigate.py:606-740`, **KHÔNG** sửa `crag_decision`/`verify_section_v2` (no-op với run thật).
+- **Verifier ≠ Writer (bất biến — chống self-preference):** grounding = **HHEM**, topic/citation = **gemma** — model verify TÁCH khỏi writer (**Qwen**). ĐỪNG để Qwen tự chấm prose của chính nó (model tự duyệt văn mình → bias). Quyết định: 2026-06-16.
 
 ## 4. Model stack (THẬT)
 | Vai trò | Model |
