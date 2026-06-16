@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from research.discovery import discover_topic, TopicProfile
 from research.outline_from_research import generate_outline, OutlineProfile, OutlineValidationError
 from research.deep_investigate import investigate_section
+from research.mathfix import normalize_math  # canonical math/special-char normalization (single source of truth)
 
 # Constants shared with research layer
 try:
@@ -33,113 +34,8 @@ except ImportError:
     _RESEARCH_AVAILABLE = False
 
 
-# ============================================================================
-# Math normalization (fixes display-math mangling that crashed tectonic; Rank9/10)
-# ============================================================================
-
-def _code_fence_spans(text: str):
-    return [(m.start(), m.end()) for m in re.finditer(r"```.*?```", text, re.DOTALL)]
-
-
-_GLUED_DISPLAY_RE = re.compile(r"(?<=[}\)\]A-Za-z0-9])\$\$(?=\s*\\[A-Za-z])")
-
-
-def _split_glued_display(content: str) -> str:
-    """Split `$$F1$$F2$$`-style glued display formulas into separate blocks."""
-    new, n = _GLUED_DISPLAY_RE.subn("$$\n\n$$", content)
-    if n:
-        print(f"[normalize_math] split {n} glued display-math delimiter(s)", flush=True)
-    return new
-
-
-def _balance_display_math(content: str) -> str:
-    """Repair odd `$$` counts (outside fenced code) that crash tectonic with
-    'Missing $ inserted'. With an odd count the LAST `$$` is unpaired; the
-    unclosed formula can sit on EITHER side of it:
-      - MISSING-OPENER: a LaTeX-bearing segment sits between the prev `$$` and
-        the orphan -> wrap that segment as its own display block.
-      - MISSING-CLOSER: a LaTeX-bearing segment trails AFTER the orphan (writer
-        opened `$$F` and never closed) -> close it by appending `$$`.
-      - otherwise (no LaTeX either side) -> drop the orphan delimiter.
-    """
-    fences = _code_fence_spans(content)
-    def in_fence(pos):
-        return any(a <= pos < b for a, b in fences)
-    positions = [m.start() for m in re.finditer(r"\$\$", content) if not in_fence(m.start())]
-    if len(positions) % 2 == 0:
-        return content
-    last = positions[-1]
-    prev = positions[-2] if len(positions) >= 2 else None
-    before = content[prev + 2:last] if prev is not None else ""
-    after = content[last + 2:]
-    has_latex = lambda s: bool(re.search(r"\\[A-Za-z]+", s))
-    if has_latex(after) and not has_latex(before):
-        m = re.search(r"\n\s*\n", after)
-        cut = (last + 2 + m.start()) if m else len(content)
-        print("[normalize_math] odd $$ count; closing unclosed trailing display formula", flush=True)
-        return content[:cut] + "$$" + content[cut:]
-    if prev is not None and has_latex(before):
-        print("[normalize_math] odd $$ count; wrapping dangling display formula (missing opener)", flush=True)
-        return (content[:prev + 2] + "\n\n$$" + before.strip() + "$$\n\n"
-                + content[last + 2:])
-    print(f"[normalize_math] odd $$ count ({len(positions)}); dropping orphan display delimiter", flush=True)
-    return content[:last] + content[last + 2:]
-
-
-_MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+?\$", re.DOTALL)
-
-_GREEK_TEX = {
-    "α": r"\alpha ", "β": r"\beta ", "γ": r"\gamma ", "δ": r"\delta ",
-    "ε": r"\epsilon ", "ζ": r"\zeta ", "η": r"\eta ", "θ": r"\theta ",
-    "ι": r"\iota ", "κ": r"\kappa ", "λ": r"\lambda ", "μ": r"\mu ",
-    "ν": r"\nu ", "ξ": r"\xi ", "π": r"\pi ", "ρ": r"\rho ",
-    "σ": r"\sigma ", "τ": r"\tau ", "υ": r"\upsilon ", "φ": r"\phi ",
-    "χ": r"\chi ", "ψ": r"\psi ", "ω": r"\omega ",
-    "Γ": r"\Gamma ", "Δ": r"\Delta ", "Θ": r"\Theta ", "Λ": r"\Lambda ",
-    "Ξ": r"\Xi ", "Π": r"\Pi ", "Σ": r"\Sigma ", "Φ": r"\Phi ",
-    "Ψ": r"\Psi ", "Ω": r"\Omega ",
-}
-
-_MATH_UNICODE = {
-    "ℝ": r"\mathbb{R}", "ℕ": r"\mathbb{N}", "ℤ": r"\mathbb{Z}",
-    "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}", "𝔼": r"\mathbb{E}",
-    "∈": r"\in", "∉": r"\notin", "∞": r"\infty", "∑": r"\sum",
-    "∏": r"\prod", "∇": r"\nabla", "∂": r"\partial",
-    "≈": r"\approx", "≤": r"\leq", "≥": r"\geq", "≠": r"\neq",
-    "×": r"\times", "⋅": r"\cdot",
-    "²": r"^{2}", "³": r"^{3}", "⁴": r"^{4}", "ⁿ": r"^{n}",
-    "₀": r"_{0}", "₁": r"_{1}", "₂": r"_{2}", "√": r"\sqrt{}",
-}
-
-
-def _escape_unicode_math(content: str) -> str:
-    import unicodedata
-    content = "".join(
-        unicodedata.normalize("NFKC", c) if 0x1D400 <= ord(c) <= 0x1D7FF else c
-        for c in content
-    )
-    def _fix_span(m):
-        span = m.group(0)
-        for ch, tex in _GREEK_TEX.items():
-            if ch in span:
-                span = span.replace(ch, tex + " ")
-        for ch, tex in _MATH_UNICODE.items():
-            if ch in span:
-                span = span.replace(ch, tex + " ")
-        return span
-    content = _MATH_SPAN_RE.sub(_fix_span, content)
-    for ch, tex in _MATH_UNICODE.items():
-        if ch in content:
-            content = content.replace(ch, f"${tex}$")
-    return content
-
-
-def normalize_math(content: str) -> str:
-    """Normalize display math so pandoc/tectonic render correctly (Rank9/10)."""
-    content = _split_glued_display(content)
-    content = _balance_display_math(content)
-    content = _escape_unicode_math(content)
-    return content
+# Math normalization (split glued -> balance $$ -> escape Unicode -> validate+neutralize)
+# now lives in research/mathfix.py (single source of truth; imported as normalize_math above).
 
 
 def _sanitize_section_content(content: str) -> str:

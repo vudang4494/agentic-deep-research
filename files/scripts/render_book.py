@@ -9,80 +9,9 @@ import argparse, re, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "files"))  # so `research.mathfix` resolves when run standalone
 
-
-def _balance_display_math(content: str) -> str:
-    """Balance $$ pairs so LaTeX doesn't crash with 'Missing $ inserted'."""
-    # Skip fenced code blocks
-    in_code = False
-    lines = content.split("\n")
-    result_lines = []
-    for line in lines:
-        if line.strip().startswith("```"):
-            in_code = not in_code
-        result_lines.append(line)
-
-    text = "\n".join(result_lines)
-    count = text.count("$$")
-    if count % 2 == 0:
-        return text
-
-    # Odd count: find the last unpaired $$
-    lines = text.split("\n")
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].count("$$") % 2 == 1:
-            lines[i] += "$$"
-            break
-    return "\n".join(lines)
-
-
-_ESCAPE_MAP = {
-    "ℝ": r"$\mathbb{R}$", "∈": r"$\in$", "∉": r"$\notin$",
-    "∞": r"$\infty$", "α": r"$\alpha$", "β": r"$\beta$", "γ": r"$\gamma$",
-    "δ": r"$\delta$", "ε": r"$\epsilon$", "θ": r"$\theta$", "λ": r"$\lambda$",
-    "μ": r"$\mu$", "π": r"$\pi$", "σ": r"$\sigma$", "φ": r"$\phi$",
-    "ω": r"$\omega$", "Γ": r"$\Gamma$", "Δ": r"$\Delta$", "Θ": r"$\Theta$",
-    "Λ": r"$\Lambda$", "Π": r"$\Pi$", "Σ": r"$\Sigma$", "Φ": r"$\Phi$",
-    "Ψ": r"$\Psi$", "Ω": r"$\Omega$",
-    "≤": r"$\leq$", "≥": r"$\geq$", "≠": r"$\neq$", "≈": r"$\approx$",
-    "×": r"$\times$", "÷": r"$\div$", "±": r"$\pm$",
-    "∇": r"$\nabla$", "∂": r"$\partial$",
-    "∀": r"$\forall$", "∃": r"$\exists$",
-    "⊂": r"$\subset$", "⊃": r"$\supset$", "∩": r"$\cap$", "∪": r"$\cup$",
-    "ℕ": r"$\mathbb{N}$", "ℤ": r"$\mathbb{Z}$", "ℂ": r"$\mathbb{C}$",
-    "𝕀": r"$\mathbb{I}$",
-    "ℹ": r"$\mathbb{I}$",
-}
-
-
-def _escape_unicode_math(content: str) -> str:
-    """Escape Unicode math symbols for LaTeX compatibility."""
-    # NFKC normalize first
-    import unicodedata
-    try:
-        content = unicodedata.normalize("NFKC", content)
-    except Exception:
-        pass
-
-    # Escape math symbols in text (outside $...$)
-    result = []
-    i = 0
-    in_math = False
-    while i < len(content):
-        c = content[i]
-        if c == "$" and (i == 0 or content[i-1] != "\\"):
-            in_math = not in_math
-            result.append(c)
-            i += 1
-            continue
-
-        if not in_math and c in _ESCAPE_MAP:
-            result.append(_ESCAPE_MAP[c])
-        else:
-            result.append(c)
-        i += 1
-
-    return "".join(result)
+from research.mathfix import normalize_math  # canonical math/special-char normalization (single source of truth)
 
 
 def clean_md(content: str) -> str:
@@ -99,17 +28,34 @@ def clean_md(content: str) -> str:
     # Pandoc interprets --- as YAML at line 1, so we already removed the frontmatter.
     # But lone --- lines in the body also trigger YAML parsing; replace them.
     content = re.sub(r"\n---\n", "\n\n***\n\n", content)
-    content = _balance_display_math(content)
-    content = _escape_unicode_math(content)
+    content = normalize_math(content)  # split glued -> balance $$ -> escape Unicode -> validate+neutralize
     return content
+
+
+# LaTeX preamble: define the operators/macros the local writer commonly emits but that
+# are NOT built-in (\softmax, \argmax, \symbb...). \providecommand = no clash if pandoc
+# or amsmath already defines one. Without these, a single \softmax crashes the whole book.
+_PREAMBLE = r"""\usepackage{amsmath}
+\usepackage{amssymb}
+\providecommand{\softmax}{\operatorname{softmax}}
+\providecommand{\argmax}{\operatorname*{arg\,max}}
+\providecommand{\argmin}{\operatorname*{arg\,min}}
+\providecommand{\sign}{\operatorname{sign}}
+\providecommand{\symbb}{\mathbb}
+\providecommand{\symbf}{\mathbf}
+\providecommand{\symcal}{\mathcal}
+"""
 
 
 def render_tectonic(clean_md_path: Path, output_pdf: Path) -> bool:
     """Render via pandoc + tectonic."""
+    header_path = clean_md_path.with_name("header.tex")
+    header_path.write_text(_PREAMBLE, encoding="utf-8")
     cmd = [
         "pandoc", str(clean_md_path),
         "-o", str(output_pdf),
         "--pdf-engine=tectonic",
+        "-H", str(header_path),
         "--toc", "--toc-depth=3",
         "-V", "geometry:margin=1in",
         "-V", "fontsize=11pt",
@@ -120,7 +66,14 @@ def render_tectonic(clean_md_path: Path, output_pdf: Path) -> bool:
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"  [tectonic] {r.stderr[-500:]}")
+        # Persist the FULL stderr so a render failure is diagnosable (not just the tail).
+        log_path = clean_md_path.with_name("tectonic.err.log")
+        try:
+            log_path.write_text(r.stderr or "", encoding="utf-8")
+        except Exception:
+            pass
+        print(f"  [tectonic] rc={r.returncode}; full log -> {log_path}")
+        print(f"  [tectonic] {r.stderr[-1200:]}")
         return False
     return True
 

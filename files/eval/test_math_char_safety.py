@@ -10,6 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # -> files/
 
 from research.fetch import _mathml_to_latex, _html_to_text
 from research.notes import clean_citations
+from research.mathfix import (
+    normalize_math, escape_unicode_math, validate_and_neutralize_math, _math_span_valid,
+)
 
 _fail = 0
 
@@ -66,10 +69,38 @@ def test_surrogate_guard():
     check("guarded text encodes cleanly + keeps formula", ok and "$a$" in fixed, fixed)
 
 
+def test_mathfix_render_safety():
+    # Rank 3/4: canonical mathfix -- extended Unicode map, span-aware sqrt, validate+neutralize.
+    print("Rank3/4 mathfix (render-safe normalization):")
+    # sqrt must carry its radicand and (in prose) be wrapped in $ -- a bare \sqrt crashes tectonic.
+    o = escape_unicode_math("root √2 and √{n+1} in prose")
+    check("prose sqrt radicand + wrapped", r"$\sqrt{2}$" in o and r"$\sqrt{n+1}$" in o, o)
+    check("no empty/bare \\sqrt{}", r"\sqrt{}" not in o and " \\sqrt" not in o, o)
+    # previously-uncovered chars now map (would otherwise drop or crash)
+    o = escape_unicode_math("A⊗B, ∫f, x→y, ⟨a,b⟩, ℓ, 𝔼[x], ‖v‖")
+    for sym, tex in [("⊗", r"\otimes"), ("∫", r"\int"), ("→", r"\to"),
+                     ("⟨", r"\langle"), ("ℓ", r"\ell"), ("𝔼", r"\mathbb{E}"), ("‖", r"\|")]:
+        check(f"{sym} -> {tex}", tex in o and sym not in o, o)
+    check("blackboard 𝔼 NOT NFKC-flattened to plain E", "$E$" not in o, o)
+    # validator: balanced ok, unbalanced/dangling \left rejected (honoring \{ \})
+    check("valid span ok", _math_span_valid(r"\frac{a}{b}") and _math_span_valid(r"\{x\}"))
+    check("broken span rejected", not _math_span_valid(r"\frac{a}{b") and not _math_span_valid(r"\left( x"))
+    # neutralize a broken span -> literal inline code (no $ exec, no \frac in text mode), prose survives
+    out = validate_and_neutralize_math(r"ok $\frac{a}{b}$ bad $\frac{1}{0$ tail survives")
+    check("valid span preserved", r"$\frac{a}{b}$" in out, out)
+    check("broken span -> literal code", r"`$\frac{1}{0$`" in out, out)
+    check("broken span not live math", "$\\frac{1}{0$ tail" not in out, out)
+    check("prose after broken span survives", "tail survives" in out, out)
+    # full pipeline is idempotent enough not to crash + keeps good math
+    p = normalize_math("Eq $$\\mathrm{softmax}(x)$$ and bad $\\frac{1}{0$ and √2.")
+    check("pipeline keeps good display math", "softmax" in p and r"$\sqrt{2}$" in p, p)
+
+
 if __name__ == "__main__":
     test_extraction_angle_brackets()
     test_citation_math_safe()
     test_surrogate_guard()
+    test_mathfix_render_safety()
     print()
     if _fail:
         print(f"RESULT: {_fail} check(s) FAILED")
