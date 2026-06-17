@@ -92,9 +92,14 @@ def test_mathfix_render_safety():
     check("broken span -> literal code", r"`$\frac{1}{0$`" in out, out)
     check("broken span not live math", "$\\frac{1}{0$ tail" not in out, out)
     check("prose after broken span survives", "tail survives" in out, out)
-    # full pipeline is idempotent enough not to crash + keeps good math
-    p = normalize_math("Eq $$\\mathrm{softmax}(x)$$ and bad $\\frac{1}{0$ and √2.")
-    check("pipeline keeps good display math", "softmax" in p and r"$\sqrt{2}$" in p, p)
+    # Per-paragraph bounding: good math in CLEAN paragraphs survives; a paragraph with an unclosed
+    # brace (content-bleed) is neutralized to literal so it cannot run to EOF and abort the render.
+    p = normalize_math("Eq $$\\mathrm{softmax}(x)$$ here.\n\nBleed: $s \\in \\mathbb{As discussed in foo$ end.\n\nRoot √2 there.")
+    check("good math in clean paragraphs survives", "softmax" in p and r"$\sqrt{2}$" in p, p)
+    check("unbalanced-brace paragraph neutralized (bounded)", r"\$s" in p or r"\mathbb\{As" in p, p)
+    # idempotent: running twice == running once (no compounding of neutralized spans)
+    once = normalize_math("bad $\\frac{1}{0$ tail")
+    check("normalize_math idempotent", normalize_math(once) == once, once)
 
 
 def test_mathfix_render_robustness():

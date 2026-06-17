@@ -69,6 +69,55 @@ def _sanitize_section_content(content: str) -> str:
     return cleaned.strip()
 
 
+# Reader-reported leak: a P0a-blocked section stores its REJECTION LOG as "content"
+# (`[BLOCKED: ...DO NOT write...]`). These internal moderation strings must NEVER reach the book.
+_INTERNAL_LOG_LINE_RE = re.compile(
+    r"^.*(?:\[BLOCKED:|\[P0a HARD BLOCK\]|DO NOT write|mark as BLOCKED|Section requires retry"
+    r"|topic_relevance\s*=\s*[0-9.]+\s*<|provider concentration\s*\d).*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _strip_internal_logs(text: str) -> str:
+    """Defensive final filter: drop any line carrying an internal moderation/log signature."""
+    return re.sub(r"\n{3,}", "\n\n", _INTERNAL_LOG_LINE_RE.sub("", text))
+
+
+def _ref_safe(s: str) -> str:
+    """Reference metadata is LITERAL text, not LaTeX -- a source title with `$...$` math, `_`, `{}`
+    or `&` would otherwise crash tectonic. Drop TeX-structural chars + markdown-escape the rest."""
+    s = re.sub(r"[\\${}^~`]", " ", str(s))        # TeX-structural chars: drop from metadata
+    s = re.sub(r"([_*\[\]<>#|])", r"\\\1", s)      # markdown-active chars: backslash-escape
+    return re.sub(r"\s{2,}", " ", s).strip()
+
+
+def _section_references(content: str, srcs: list) -> list:
+    """Resolve the inline [N] citation markers into a compact per-section reference list so the
+    raw tags are no longer dangling (Reader feedback). Deterministic -- no LLM editor needed."""
+    def g(s, k):
+        return (s.get(k, "") if isinstance(s, dict) else getattr(s, k, "")) or ""
+    cited = sorted({int(n) for n in re.findall(r"\[(\d+)\]", content) if 1 <= int(n) <= len(srcs)})
+    if not cited:
+        return []
+    out = ["**References**", ""]
+    for n in cited:
+        s = srcs[n - 1]
+        title = _ref_safe(g(s, "title")) or "Untitled source"
+        auth = g(s, "authors")
+        auth = _ref_safe(", ".join(auth[:2]) if isinstance(auth, list) else auth)
+        year = re.sub(r"[^0-9]", "", str(g(s, "year")))[:4]
+        url = re.sub(r"\s", "", str(g(s, "url")))
+        line = f"{n}. {title}"
+        if auth:
+            line += f" — {auth}"
+        if year:
+            line += f" ({year})"
+        if url and url.startswith("http"):
+            line += f". <{url}>"
+        out.append(line)
+    return out
+
+
 def assemble_book(outline, sections, output_path):
     _subtitle = outline.get("subtitle") or ""
     lines = [
@@ -87,11 +136,21 @@ def assemble_book(outline, sections, output_path):
         for sec in ch.get("sections", []):
             _sn = str(sec.get("n", 0))
             _st = sec.get("t", "")
+            key = _cn + "." + _sn
+            sec_data = sections.get(key, {})
+            raw = sec_data.get("content", "") or ""
+            # Omit a P0a-blocked section entirely (heading + body): its stored "content" is the
+            # internal rejection log, which must not ship in the book.
+            if sec_data.get("quality") == "BLOCKED" or raw.lstrip().startswith("[BLOCKED"):
+                continue
             lines.append("## " + _sn + ". " + _st)
             lines.append("")
-            key = _cn + "." + _sn
-            content = _sanitize_section_content(sections.get(key, {}).get("content", ""))
+            content = _sanitize_section_content(raw)
             lines.append(content)
+            refs = _section_references(content, sec_data.get("sources", []) or [])
+            if refs:
+                lines.append("")
+                lines.extend(refs)
             lines.append("")
     assembled = "\n".join(lines)
 
@@ -121,6 +180,9 @@ def assemble_book(outline, sections, output_path):
                   len(orphan_h3), orphan_h3[:2]))
     else:
         print("[ASSEMBLE] Heading hygiene OK: %d H2, %d H3" % (len(h2_titles), len(h3_titles)))
+
+    # Defensive final filter: strip any internal moderation/log line that slipped through.
+    assembled = _strip_internal_logs(assembled)
 
     # Guard: a lone surrogate (from a botched upstream decode) crashes write_text(utf-8)
     # with 'surrogates not allowed', aborting the whole run before render. Strip un-encodable.
