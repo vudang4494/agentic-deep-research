@@ -9,8 +9,10 @@ from pathlib import Path
 HERE = Path(__file__).parent
 OUT_DIR = HERE / "output"
 
-STATE  = OUT_DIR / "state.json"
-REPORT = OUT_DIR / "report.json"
+# Default run lives under output/runs/book/ (see deep_research._rebind_output_paths).
+RUN_DIR = OUT_DIR / "runs" / "book"
+STATE  = RUN_DIR / "state.json"
+REPORT = RUN_DIR / "report.json"
 WORDS_PER_PAGE = 400
 
 
@@ -72,7 +74,7 @@ def main():
                 print(line, flush=True)
                 last = line
             if p["written"] >= TOTAL:
-                print("\nDONE! Check files/output/book.pdf")
+                print("\nDONE! Check files/output/runs/book/book.pdf")
                 r = get_report()
                 if r:
                     print(f"  Time:  {r.get('total_time_min', '?')} min")

@@ -2,9 +2,13 @@
 """
 Deep Research Pipeline -- Agentic Book Generator
 =================================================
+[LEGACY v2 -- pre-fixed outline. NOT the live pipeline.]
+Live orchestrator = files/deep_research_v3.py (see CLAUDE.md). This v2 path is
+kept only because runner.py / monitor.py / eval/run_eval.py still import it.
+Do NOT edit this as if it were the active pipeline.
+
 Stage 1 of the Agentic Deep Research roadmap: section-by-section book generation
 with prior-section memory, optional LLM-as-judge review, and structural sanitization.
-Future stages add retrieval, planning, and re-search loops (see WORKPLAN.md).
 
 Current implementation:
   - 12 chapters x N passes (atomic LLM calls, ~1,300 words each)
@@ -13,10 +17,16 @@ Current implementation:
   - Sanitization strips model-hallucinated H1/H2 / References / Conclusion blocks
   - Auto-resume from checkpoint, macOS notification, PDF render
 """
-import json, os, re, sys, time, signal, argparse, subprocess, threading
+import json, os, re, sys, time, signal, argparse, subprocess, threading, tempfile, atexit, errno
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
+
+try:
+    import fcntl  # POSIX only; we degrade to no-op locks on Windows
+    _HAVE_FCNTL = True
+except ImportError:
+    _HAVE_FCNTL = False
 
 # Stage 2 -- agentic research layer. Optional: pipeline degrades to Stage 1 if
 # the package fails to import (e.g. missing httpx).
@@ -31,30 +41,37 @@ except Exception as _research_import_err:
 
 # === CONFIG ===
 OLLAMA_BASE  = "http://localhost:11434"
-# Writer model: override via env DEEP_RESEARCH_WRITER_MODEL.
-# Recommended upgrades for better synthesis:
-#   - qwen2.5:7b  (~4.7 GB, better instruction-following)
-#   - qwen2.5:14b (~9 GB,   noticeably stronger synthesis if RAM allows)
-#   - mixtral:8x7b (~26 GB, only if you have the headroom)
-MODEL = os.environ.get("DEEP_RESEARCH_WRITER_MODEL", "gemma3:4b")
+# Writer model: qwen3.6-35b:iq3 (MoE 35B/3B active, IQ3_8K) -- best prose quality.
+# Research layer: gemma4:e4b (fast, 6.4 GB) -- QGN, VFY, RSR.
+# Pull: ollama pull batiai/qwen3.6-35b:iq3 && ollama pull gemma4:e4b
+MODEL = os.environ.get("DEEP_RESEARCH_WRITER_MODEL", "batiai/qwen3.6-35b:iq3")
 DEFAULT_TIMEOUT = 600
 
 BASE_DIR  = Path(__file__).parent
 OUT_DIR   = BASE_DIR / "output"
+RUNS_DIR  = OUT_DIR / "runs"
 OUT_DIR.mkdir(exist_ok=True)
 
-STATE_FILE   = OUT_DIR / "state.json"
-FINAL_MD     = OUT_DIR / "book.md"
-FINAL_HTML   = OUT_DIR / "book.html"
-FINAL_PDF    = OUT_DIR / "book.pdf"
-CLEAN_MD     = OUT_DIR / "book.clean.md"
-REPORT_FILE  = OUT_DIR / "report.json"
-LOG_FILE     = OUT_DIR / "pipeline.log"
+# Every run lives in its own folder under output/runs/<name>/ with neutral
+# filenames (book.md, state.json, ...). The folder carries the version; the
+# files do not repeat it. Default (no --out-name) is the run named "book".
+# Folder creation is deferred to write time so importing this module (e.g. by
+# watch.sh / the eval harness) does not litter empty run dirs.
+_DEFAULT_RUN = RUNS_DIR / "book"
+
+STATE_FILE   = _DEFAULT_RUN / "state.json"
+FINAL_MD     = _DEFAULT_RUN / "book.md"
+FINAL_HTML   = _DEFAULT_RUN / "book.html"
+FINAL_PDF    = _DEFAULT_RUN / "book.pdf"
+CLEAN_MD     = _DEFAULT_RUN / "book.clean.md"
+REPORT_FILE  = _DEFAULT_RUN / "report.json"
+LOG_FILE     = _DEFAULT_RUN / "pipeline.log"
 
 
 def _rebind_output_paths(out_name: str):
-    """Repoint every output path so a single run can produce its own family of
-    artifacts (book1.md / book1.pdf / book1.state.json / ...). Idempotent.
+    """Repoint every output path into output/runs/<name>/ so a run produces its
+    own folder of neutral-named artifacts (book.md / book.pdf / state.json / ...).
+    Idempotent.
 
     Mirror this convention in runner.py via the DEEP_RESEARCH_OUT_NAME env var.
     """
@@ -62,13 +79,15 @@ def _rebind_output_paths(out_name: str):
     name = out_name.strip().strip("/")
     if not name:
         return
-    STATE_FILE  = OUT_DIR / f"{name}.state.json"
-    FINAL_MD    = OUT_DIR / f"{name}.md"
-    FINAL_HTML  = OUT_DIR / f"{name}.html"
-    FINAL_PDF   = OUT_DIR / f"{name}.pdf"
-    CLEAN_MD    = OUT_DIR / f"{name}.clean.md"
-    REPORT_FILE = OUT_DIR / f"{name}.report.json"
-    LOG_FILE    = OUT_DIR / f"{name}.pipeline.log"
+    base = RUNS_DIR / name
+    base.mkdir(parents=True, exist_ok=True)
+    STATE_FILE  = base / "state.json"
+    FINAL_MD    = base / "book.md"
+    FINAL_HTML  = base / "book.html"
+    FINAL_PDF   = base / "book.pdf"
+    CLEAN_MD    = base / "book.clean.md"
+    REPORT_FILE = base / "report.json"
+    LOG_FILE    = base / "pipeline.log"
 
 # Legacy filenames migrated to the new structure on first run.
 _LEGACY_MAP = {
@@ -98,7 +117,16 @@ def migrate_legacy_outputs():
         print("[MIGRATE] renamed legacy outputs: " + ", ".join(moved))
 
 
-WORD_BUDGET = 4200  # default words-per-section budget
+# W1: target length emerges from evidence count, not a static budget. The old
+# `WORD_BUDGET = 4200` + "Target: 1800-2500 words" prompt pressure caused 4B
+# writers to loop, hallucinate, and drop citations to game the verifier.
+# `WORD_BUDGET` is now a *ceiling* (the upper cap on the dynamic target), not
+# a target. The dict `"w"` field on each section is kept for backward compat
+# but is ignored at runtime in favor of compute_target_words().
+WORD_BUDGET = 1500              # ceiling -- never ask the writer for more
+WORD_TARGET_PER_SOURCE = 220    # per retained evidence source
+WORD_TARGET_FLOOR = 400         # minimum target so empty results still produce a stub
+WORD_TARGET_NO_EVIDENCE = 900   # fallback when research layer is off
 
 
 # === CHAPTERS: 12 chapters × 6 passes = 72 sections ===
@@ -247,6 +275,7 @@ class OllamaClient:
         payload = {
             "model": self.model,
             "stream": False,
+            "think": False,
             "messages": msgs,
             "options": {
                 "temperature": temperature,
@@ -265,6 +294,11 @@ class OllamaClient:
                 data = r.json()
         msg = data.get("message", {})
         content = msg.get("content", "").strip()
+        # Some quantized models may put content in "thinking" field; fallback.
+        if not content:
+            thinking = msg.get("thinking", "").strip()
+            if thinking:
+                content = thinking
         ec = data.get("eval_count", 0)
         ed = data.get("eval_duration", 0)
         tps = ec / (ed / 1e9) if ed > 0 else 0
@@ -292,30 +326,42 @@ SYS = (
     "1. Do NOT output any H1 (`#`) or H2 (`##`) heading. The section heading is added by the "
     "assembler. You may use H3 (`###`) and H4 (`####`) for sub-topics inside the section.\n"
     "2. Do NOT start with phrases like 'In this section', 'This chapter covers', 'We will discuss', "
-    "or any meta-introduction. Start directly with substantive content.\n"
+    "or any meta-introduction. Start directly with substantive content. Also AVOID the "
+    "formulaic openings this book overuses: do NOT begin with 'The {abstract noun} of', do NOT "
+    "open by restating 'Large Language Models (LLMs)', and do NOT use the word 'necessitates'. "
+    "Open in medias res with a concrete fact, formula, named method, or benchmark result from the "
+    "EVIDENCE -- e.g. lead with a definition, a number, or a specific paper's finding.\n"
     "3. Do NOT write a 'Conclusion', 'Summary', 'Wrap-up', or 'In summary' section at the end. "
     "End with the last technical point.\n"
     "4. Do NOT write a 'References', 'Bibliography', or 'Further Reading' section. A single "
     "References page is assembled from your [N] markers at the end of the book.\n"
-    "5. CITATIONS -- when an EVIDENCE block is provided above the section prompt:\n"
-    "   (a) AIM for 5-8 `[N]` citations per section, anchored on specific factual claims "
-    "(numbers, dates, formulas, named methods, benchmark results, paper findings).\n"
-    "   (b) The EVIDENCE block tells you exactly which N's are valid -- use ONLY those numbers, "
-    "do not invent indices beyond what is provided.\n"
-    "   (c) Prefer multiple `[N]` per paragraph when several sources back the same point -- "
-    "stacking citations is a strength, not a weakness.\n"
-    "   (d) If evidence is genuinely missing for a sub-point, hedge ('it has been argued that...', "
-    "'recent work suggests...') WITHOUT a citation rather than dropping the point. Writing with "
-    "zero citations is worse than writing with three -- it suggests you ignored the evidence.\n"
-    "   (e) Do NOT fabricate papers, URLs, authors, or dates -- only cite what's in EVIDENCE.\n"
-    "6. When no EVIDENCE block is present, fall back to inline author-year style "
-    "`(Vaswani et al., 2017)` for well-known canonical references only.\n"
+    "5. CITATIONS (MANDATORY when an EVIDENCE block is present): You MUST place at least "
+    "FIVE `[N]` citation markers in this section, where N is a source number from the EVIDENCE "
+    "block. A section with zero `[N]` markers is REJECTED and regenerated -- citing is the single "
+    "most important requirement. Anchor each `[N]` on a specific factual claim (number, date, "
+    "formula, named method, benchmark, paper finding). Stack multiple `[N]` in one sentence when "
+    "several sources agree. Use ONLY the numbers shown in EVIDENCE; never invent a higher index. "
+    "When citing, name the real author/lab from the EVIDENCE entry (e.g. 'Wei et al. (2022) [3]') "
+    "-- never write a search-tool name (Tavily/DuckDuckGo/Brave) as the author, and never write "
+    "the literal placeholder `[N]` (always a concrete digit). If a single sub-point truly has no "
+    "matching source, hedge it in prose WITHOUT a marker -- but the section as a whole must still "
+    "carry its 5+ real citations.\n"
+    "6. When NO EVIDENCE block is present, use inline author-year style "
+    "`(Vaswani et al., 2017)` for well-known canonical references only -- never a search-tool name.\n"
     "7. Do NOT repeat definitions of concepts that have already been introduced earlier in the book "
     "(a context block will tell you what was covered). Reference them and build on them.\n"
     "8. Avoid filler -- prefer dense technical content over restating the topic. Quality over word count.\n"
-    "9. Write in a scholarly, precise style. Include formulas in LaTeX (`$...$` or `$$...$$`) and "
+    "9. VISUALS (use liberally): Add markdown tables for comparison content, a reference "
+    "table at the start of every section comparing the methods/approaches discussed, "
+    "and code blocks for implementations. Tables look like:\n\n"
+    "    | Method | Pros | Cons | Best For |\n"
+    "    | :--- | :--- | :--- | :--- |\n"
+    "    | Method A | ... | ... | ... |\n\n"
+    "Use comparison tables for: method surveys, benchmark results, hyperparameter ranges, "
+    "architecture comparisons, and any content where a grid is clearer than prose.\n"
+    "10. Write in a scholarly, precise style. Include formulas in LaTeX (`$...$` or `$$...$$`) and "
     "code examples in fenced blocks where genuinely useful.\n"
-    "10. MATH NOTATION: every variable, Greek letter, subscript, superscript, fraction, sum, "
+    "11. MATH NOTATION: every variable, Greek letter, subscript, superscript, fraction, sum, "
     "or operator MUST be inside `$...$` (inline) or `$$...$$` (display). Do NOT use HTML "
     "`<sub>`/`<sup>` tags, do NOT italic-wrap symbols like `*alpha*` or `*beta*`, do NOT "
     "duplicate a formula in both a Unicode/plain-text form AND a LaTeX form -- write each "
@@ -462,6 +508,129 @@ def normalize_math(content: str) -> str:
         content,
     )
 
+    # 6. Rank10 -- the REAL tectonic crash. The writer glues consecutive display
+    #    formulas sharing a delimiter: `$$F1$$F2$$` -> pandoc reads F1 as math,
+    #    F2 as TEXT (its \frac/\text commands then break math mode -> "Missing $
+    #    inserted"). First split shared delimiters (a `$$` flush against a
+    #    formula-end before AND a \command after is a close+open that must become
+    #    two blocks), then balance any residual odd count.
+    content = _split_glued_display(content)
+    content = _balance_display_math(content)
+
+    # 7. Rank10 -- escape raw Unicode Greek INSIDE math spans to LaTeX commands
+    #    (the real cause of the tectonic "no beta glyph" warning + silent glyph
+    #    drop). Only touches text between $...$ / $$...$$ so prose Greek is left
+    #    alone. Idempotent: \beta has no Unicode Greek to re-convert.
+    content = _escape_unicode_math(content)
+
+    return content
+
+
+def _code_fence_spans(text: str):
+    return [(m.start(), m.end()) for m in re.finditer(r"```.*?```", text, re.DOTALL)]
+
+
+# A `$$` that is flush against a formula-ending char on the left AND a LaTeX
+# `\command` on the right is a shared close+open delimiter between two glued
+# display formulas. Requiring the `\command` lookahead means a `$$` that closes
+# a formula and is followed by ordinary prose (" The model...") is NOT split.
+_GLUED_DISPLAY_RE = re.compile(r"(?<=[}\)\]A-Za-z0-9])\$\$(?=\s*\\[A-Za-z])")
+
+
+def _split_glued_display(content: str) -> str:
+    """Split `$$F1$$F2$$`-style glued display formulas into separate blocks."""
+    new, n = _GLUED_DISPLAY_RE.subn("$$\n\n$$", content)
+    if n:
+        print(f"[normalize_math] split {n} glued display-math delimiter(s)", flush=True)
+    return new
+
+
+def _balance_display_math(content: str) -> str:
+    """Repair odd `$$` counts (outside fenced code) that crash tectonic with
+    'Missing $ inserted'. With an odd count the LAST `$$` is unpaired; the
+    unclosed formula can sit on EITHER side of it:
+      - MISSING-OPENER: a LaTeX-bearing segment sits between the prev `$$` and
+        the orphan -> wrap that segment as its own display block.
+      - MISSING-CLOSER: a LaTeX-bearing segment trails AFTER the orphan (writer
+        opened `$$F` and never closed) -> close it by appending `$$`.
+      - otherwise (no LaTeX either side) -> drop the orphan delimiter.
+    """
+    fences = _code_fence_spans(content)
+    def in_fence(pos):
+        return any(a <= pos < b for a, b in fences)
+    positions = [m.start() for m in re.finditer(r"\$\$", content) if not in_fence(m.start())]
+    if len(positions) % 2 == 0:
+        return content
+    last = positions[-1]
+    prev = positions[-2] if len(positions) >= 2 else None
+    before = content[prev + 2:last] if prev is not None else ""
+    after = content[last + 2:]
+    has_latex = lambda s: bool(re.search(r"\\[A-Za-z]+", s))
+    # Prefer the side whose dangling segment looks like a formula. Check the
+    # AFTER side first (missing-closer is the common "$$F never closed" case
+    # the review flagged); fall back to the BEFORE side (missing-opener).
+    if has_latex(after) and not has_latex(before):
+        # trailing formula opened by `last`, never closed: close it.
+        # close at the end of the formula-ish run (first blank line) or doc end.
+        m = re.search(r"\n\s*\n", after)
+        cut = (last + 2 + m.start()) if m else len(content)
+        print("[normalize_math] odd $$ count; closing unclosed trailing display formula", flush=True)
+        return content[:cut] + "$$" + content[cut:]
+    if prev is not None and has_latex(before):
+        print("[normalize_math] odd $$ count; wrapping dangling display formula (missing opener)", flush=True)
+        return (content[:prev + 2] + "\n\n$$" + before.strip() + "$$\n\n"
+                + content[last + 2:])
+    print(f"[normalize_math] odd $$ count ({len(positions)}); dropping orphan display delimiter", flush=True)
+    return content[:last] + content[last + 2:]
+
+
+_MATH_SPAN_RE = re.compile(r"\$\$.+?\$\$|\$[^$\n]+?\$", re.DOTALL)
+
+# Unicode math symbols that pandoc renders as math-mode-only LaTeX commands
+# (e.g. ℝ -> \symbb{R}, which crashes tectonic with "allowed only in math mode"
+# when the char sits in TEXT). bookv6 had ℝ, ∈, ∞, plus mathematical-alphanumeric
+# styled letters (𝑑, 𝒃) handled separately via NFKC folding.
+_MATH_UNICODE = {
+    "ℝ": r"\mathbb{R}", "ℕ": r"\mathbb{N}", "ℤ": r"\mathbb{Z}",
+    "ℚ": r"\mathbb{Q}", "ℂ": r"\mathbb{C}", "𝔼": r"\mathbb{E}",
+    "∈": r"\in", "∉": r"\notin", "∞": r"\infty", "∑": r"\sum",
+    "∏": r"\prod", "∇": r"\nabla", "∂": r"\partial",
+    "≈": r"\approx", "≤": r"\leq", "≥": r"\geq", "≠": r"\neq",
+    "×": r"\times", "⋅": r"\cdot",
+    "²": r"^{2}", "³": r"^{3}", "⁴": r"^{4}", "ⁿ": r"^{n}",
+    "₀": r"_{0}", "₁": r"_{1}", "₂": r"_{2}", "√": r"\sqrt{}",
+}
+
+
+def _escape_unicode_math(content: str) -> str:
+    r"""Make Unicode math safe for tectonic:
+      - NFKC-fold mathematical-alphanumeric styled letters (italic d -> d) everywhere
+        (harmless in prose, fixes \symbb-style commands in math).
+      - Inside math spans: Unicode Greek + math symbols -> LaTeX commands.
+      - In text: stray math symbols (R-double-struck, in, infinity, ...) get
+        wrapped in $...$ so they render in math mode instead of crashing tectonic.
+    """
+    import unicodedata
+    content = "".join(
+        unicodedata.normalize("NFKC", c) if 0x1D400 <= ord(c) <= 0x1D7FF else c
+        for c in content
+    )
+
+    def _fix_span(m):
+        span = m.group(0)
+        for ch, tex in _GREEK_TEX.items():
+            if ch in span:
+                span = span.replace(ch, tex + " ")
+        for ch, tex in _MATH_UNICODE.items():
+            if ch in span:
+                span = span.replace(ch, tex + " ")
+        return span
+    content = _MATH_SPAN_RE.sub(_fix_span, content)
+
+    # Remaining math symbols are in TEXT -> wrap each in $...$.
+    for ch, tex in _MATH_UNICODE.items():
+        if ch in content:
+            content = content.replace(ch, f"${tex}$")
     return content
 
 
@@ -478,6 +647,16 @@ def sanitize(content: str) -> str:
     if not content:
         return content
     text = content.strip()
+
+    # Rank9: content-bleed. A leading line carrying an orphan "(ChN.M...)" outline
+    # tag is a prior section's disambiguated title that leaked into this body
+    # (bookv6 section 8.4 opened with "Multi-Objective Alignment... (Ch5.10.4)").
+    # Drop that whole leading line, then strip any residual inline tag anywhere.
+    text = re.sub(
+        r"\A\s*(?:#{1,6}\s*|\*\*\s*)?[^\n]*\((?:Ch|Chapter)\s*\d+\.\d+[^)]*\)[^\n]*\n+",
+        "", text,
+    )
+    text = re.sub(r"\s*\((?:Ch|Chapter)\s*\d+\.\d+(?:\.\d+)*[^)]*\)", "", text)
 
     # Structural pass.
     text = _META_INTRO_RE.sub("", text, count=1)
@@ -571,7 +750,23 @@ def extract_concepts(content: str, limit: int = 15) -> list:
         return []
     # Strip fenced code blocks before extraction so Python comments don't leak in
     code_stripped = re.sub(r"```[\s\S]*?```", "", content)
-    raw = _CONCEPT_HEADER_RE.findall(code_stripped) + _CONCEPT_BOLD_RE.findall(code_stripped)
+    # Rank7: the 4B writer rarely emits H3/H4 or bold, so the header/bold regexes
+    # found nothing in 144/150 bookv6 sections. Add two reliable signals:
+    #   - ALL-CAPS acronyms (DPO, RLHF, RAG, MoE, PPO, ViT, ...) -- 2-6 chars
+    #   - canonical method/model names present in the text (the seed aliases),
+    #     which are exactly the concepts we must stop later sections redefining.
+    acronyms = re.findall(r"\b[A-Z][A-Za-z]?[A-Z]{1,4}\b", code_stripped)
+    canon = []
+    if RESEARCH_AVAILABLE:
+        try:
+            low = code_stripped.lower()
+            canon = [a for a in _research.canonical_seeds.SEED_MAP
+                     if re.search(r"\b" + re.escape(a) + r"\b", low)]
+        except Exception:
+            canon = []
+    raw = (_CONCEPT_HEADER_RE.findall(code_stripped)
+           + _CONCEPT_BOLD_RE.findall(code_stripped)
+           + acronyms + canon)
     seen = {}
     for c in raw:
         c = c.strip().rstrip(":.,").strip()
@@ -595,10 +790,16 @@ def extract_concepts(content: str, limit: int = 15) -> list:
 
 
 def prev_tail(content: str, n_words: int = CONTINUATION_WORDS) -> str:
-    """Return the last ~n_words of a section, used as continuity context for the next call."""
+    """Return the last ~n_words of a section, used as continuity context for the next call.
+
+    Rank9: strip markdown headings and "(ChN.M...)" outline tags from the tail first,
+    so the next section doesn't echo a heading/title it sees in the continuation
+    context (the content-bleed source)."""
     if not content:
         return ""
-    words = re.findall(r"\S+", content)
+    cleaned = re.sub(r"(?m)^\s*#{1,6}\s.*$", "", content)
+    cleaned = re.sub(r"\((?:Ch|Chapter)\s*\d+\.\d+[^)]*\)", "", cleaned)
+    words = re.findall(r"\S+", cleaned)
     tail = " ".join(words[-n_words:])
     return tail
 
@@ -743,27 +944,196 @@ def notify(title: str, body: str):
 # State management
 # ============================================================================
 
+# --- W3: process-safe state I/O ---------------------------------------------
+# Why: state.json was written via plain open()+json.dump (non-atomic) and
+# guarded only by threading.Lock (does NOT cross processes). When the runner
+# watchdog respawned a fresh pipeline before the prior one was confirmed dead,
+# two writers raced on state.json -> JSON parse failure on next resume.
+# Fix: atomic write (tempfile + os.replace) + cross-process fcntl.flock on a
+# dedicated .lock sidecar, plus a startup PID lock that refuses double-spawn.
+
+class _FileLock:
+    """Cross-process advisory lock via fcntl.flock on a sidecar .lock file."""
+    def __init__(self, path: Path, exclusive: bool = True):
+        self.path = path
+        self.exclusive = exclusive
+        self._fh = None
+
+    def __enter__(self):
+        if not _HAVE_FCNTL:
+            return self  # no-op on non-POSIX
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        mode = fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
+        fcntl.flock(self._fh.fileno(), mode)
+        return self
+
+    def __exit__(self, *exc):
+        if self._fh is None:
+            return
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
+
+
+def _atomic_write_json(path: Path, obj) -> None:
+    """Atomic JSON write: temp in same dir -> fsync -> os.replace (POSIX atomic)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", dir=str(path.parent),
+        prefix=f".{path.name}.", suffix=".tmp",
+        delete=False, encoding="utf-8",
+    )
+    try:
+        json.dump(obj, tmp, indent=2, ensure_ascii=False)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp.close()
+        os.replace(tmp.name, str(path))
+    except Exception:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        raise
+
+
+def _state_lock_path() -> Path:
+    return STATE_FILE.with_suffix(STATE_FILE.suffix + ".lock")
+
+
 def load_state():
-    if STATE_FILE.exists():
+    if not STATE_FILE.exists():
+        return {"passes": {}, "total_words": 0, "total_tokens": 0, "total_calls": 0}
+    with _FileLock(_state_lock_path(), exclusive=False):
         with open(STATE_FILE) as f:
             return json.load(f)
-    return {"passes": {}, "total_words": 0, "total_tokens": 0, "total_calls": 0}
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    with _FileLock(_state_lock_path(), exclusive=True):
+        _atomic_write_json(STATE_FILE, state)
+
+
+# --- W3: pipeline PID lock --------------------------------------------------
+# Refuses to start a second pipeline against the same output basename. Killed
+# the "watchdog respawn before original is dead" failure mode at the source.
+_PID_LOCK_FH = None
+
+
+def acquire_pipeline_lock() -> None:
+    """Acquire an exclusive PID lock on <state>.pid; exit(2) if another holder exists."""
+    global _PID_LOCK_FH
+    if not _HAVE_FCNTL:
+        return  # best-effort on non-POSIX
+    pid_path = STATE_FILE.with_suffix(STATE_FILE.suffix + ".pid")
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(pid_path, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as e:
+        if e.errno in (errno.EAGAIN, errno.EACCES):
+            fh.seek(0)
+            existing = fh.read().strip() or "?"
+            fh.close()
+            print(
+                f"[deep_research] REFUSE: another pipeline holds {pid_path} "
+                f"(pid={existing}). Kill it first, or use a different --out-name.",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(2)
+        raise
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    os.fsync(fh.fileno())
+    _PID_LOCK_FH = fh  # keep open for process lifetime; closes on exit
+    atexit.register(_release_pipeline_lock, pid_path)
+
+
+def _release_pipeline_lock(pid_path: Path) -> None:
+    global _PID_LOCK_FH
+    if _PID_LOCK_FH is not None:
+        try:
+            fcntl.flock(_PID_LOCK_FH.fileno(), fcntl.LOCK_UN)
+            _PID_LOCK_FH.close()
+        except Exception:
+            pass
+        _PID_LOCK_FH = None
+    try:
+        pid_path.unlink()
+    except OSError:
+        pass
 
 
 # ============================================================================
 # Generation
 # ============================================================================
 
-def gen(client, ch_n, ch_t, pp_n, pp_t, prompt, budget, context_block="", evidence_block=""):
-    num_predict = min(int(budget * 2.5), 12000)
+# W1: regex strips the legacy "Target: 1800-2500 words." trailer that every
+# hardcoded prompt in CHAPTERS carries. We replace it with a dynamic target
+# derived from the actual evidence count so the writer is not asked to pad.
+_LEGACY_TARGET_RE = re.compile(
+    r"\s*Target:\s*\d{2,5}\s*[-–—]\s*\d{2,5}\s*words?[^.]*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def compute_target_words(n_evidence: int, has_research: bool) -> int:
+    """Derive a per-section target from the number of retained evidence sources.
+
+    Why: forcing 1800-2500 words from a 4B writer was the root cause of looping
+    and citation gaming -- the model has nothing to say once the topic is
+    actually covered, so it pads and drops citations to scrape a verifier score.
+    Let length follow content.
+    """
+    if not has_research:
+        return WORD_TARGET_NO_EVIDENCE
+    if n_evidence <= 0:
+        return WORD_TARGET_FLOOR
+    return max(WORD_TARGET_FLOOR, min(WORD_BUDGET, n_evidence * WORD_TARGET_PER_SOURCE))
+
+
+def _prepare_prompt(prompt: str, target_words: int, has_evidence: bool) -> str:
+    """Strip the hardcoded 'Target: NNNN-NNNN words.' trailer and append a
+    dynamic, honest length directive that tells the writer to stop when the
+    topic is covered."""
+    cleaned = _LEGACY_TARGET_RE.sub("", prompt).rstrip()
+    if has_evidence:
+        suffix = (
+            f"\n\nLength: aim for approximately {target_words} words. "
+            "If you run out of grounded material from the EVIDENCE block, "
+            "stop -- do not pad. A shorter section with accurate citations "
+            "is preferred over a long section that drops citations or repeats."
+        )
+    else:
+        suffix = (
+            f"\n\nLength: aim for approximately {target_words} words. "
+            "Stop when the topic is fully covered -- do not pad."
+        )
+    return cleaned + suffix
+
+
+def gen(client, ch_n, ch_t, pp_n, pp_t, prompt, target_words, context_block="", evidence_block=""):
+    # W1: num_predict capped to 2x the dynamic word target.
+    # 2.0x is the empirical ratio between tokens and words for English output.
+    # Ceiling raised from 4000 to 6000: longer sections need headroom.
+    num_predict = max(800, min(int(target_words * 2.0), 6000))
+    has_evidence = bool(evidence_block.strip())
+    prepared_prompt = _prepare_prompt(prompt, target_words, has_evidence)
     user_prompt = "%s%sChapter %d: %s -- Section %d: %s\n\n%s" % (
-        context_block, evidence_block, ch_n, ch_t, pp_n, pp_t, prompt,
+        context_block, evidence_block, ch_n, ch_t, pp_n, pp_t, prepared_prompt,
     )
+    # W1: acceptance threshold is now 40% of target (was 25% of 4200 == 1050w
+    # regardless of context). 40% gives the writer permission to stop early
+    # without making us accept a one-paragraph stub.
+    min_accept = max(200, int(target_words * 0.4))
+    # Zero-citation detection: if section has no [N] markers, it is a fail.
+    # Retry up to 3 times to get citations.
+    _cite_re = re.compile(r"\[(\d+)\]")
     for attempt in range(3):
         try:
             content, stats = client.generate(
@@ -774,8 +1144,14 @@ def gen(client, ch_n, ch_t, pp_n, pp_t, prompt, budget, context_block="", eviden
             )
             content = sanitize(content)
             w = wc(content)
-            if w >= budget * 0.25 or attempt == 2:
+            n_cites = len(_cite_re.findall(content))
+            # Accept if word count sufficient OR (has citations OR last attempt)
+            if (w >= min_accept and n_cites > 0) or attempt == 2:
                 return content, stats, w
+            # If words OK but zero citations, warn and retry
+            if w >= min_accept and n_cites == 0:
+                log(f"  [WARN] attempt {attempt+1}: 0 citations, regenerating...")
+                time.sleep(2)
         except Exception as e:
             log(f"  Attempt {attempt+1} failed: {e}")
             time.sleep(5)
@@ -848,11 +1224,17 @@ def _build_references(state) -> str:
     lines = ["# References", ""]
     for n, key in enumerate(order, start=1):
         s = seen[key]
-        authors = ", ".join(s.get("authors") or []) or s.get("provider", "Source").capitalize()
+        # neutral_author never prints a search-tool brand (Tavily/DDG/Brave) as author.
+        authors = _research.types.neutral_author(
+            s.get("authors"), s.get("provider", ""), s.get("url", "")
+        ) if RESEARCH_AVAILABLE else ", ".join(s.get("authors") or [])
         year = f" ({s['year']})" if s.get("year") else ""
         title = s.get("title", "Untitled")
         url = s.get("url", "")
-        lines.append(f"[{n}] {authors}{year}. _{title}_. <{url}>")
+        # Build attribution so empty-author + present-year never glues "(2024)_Title_".
+        attribution = (authors + year).strip()
+        prefix = f"{attribution}. " if attribution else ""
+        lines.append(f"[{n}] {prefix}_{title}_. <{url}>")
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -932,7 +1314,14 @@ def _prepare_clean_md() -> Path:
             fixed.append("* * *")
         else:
             fixed.append(line)
-    CLEAN_MD.write_text("\n".join(fixed))
+    clean = "\n".join(fixed)
+    # Rank10 safety net: repair display math across the WHOLE assembled doc
+    # before pandoc->tectonic, so math mangling from any section (or an
+    # already-generated book) can't crash tectonic at render time.
+    clean = _split_glued_display(clean)
+    clean = _balance_display_math(clean)
+    clean = _escape_unicode_math(clean)
+    CLEAN_MD.write_text(clean)
     return CLEAN_MD
 
 
@@ -1018,8 +1407,15 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         research=True, topic=None, n_chapters=None, n_passes=None, out_name=None):
     if out_name:
         _rebind_output_paths(out_name)
-        print(f"[deep_research] output paths rebound: prefix={out_name!r}", flush=True)
+        print(f"[deep_research] output dir: {STATE_FILE.parent}", flush=True)
+    # Ensure the run dir exists for the default ("book") run too, regardless of
+    # platform / fcntl availability, before any artifact is written.
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     migrate_legacy_outputs()
+
+    # W3: refuse to run if another pipeline already owns this output basename.
+    # Must happen after _rebind_output_paths so STATE_FILE points at the right file.
+    acquire_pipeline_lock()
 
     # Clear log on fresh start
     if start_ch == 1 and start_pp == 1:
@@ -1046,7 +1442,8 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 outline_source = (f"planner-generated for topic {topic!r} "
                                   f"({len(planned)}x{len(planned[0]['passes'])})")
             else:
-                print(f"[planner] WARN: outline generation failed -- falling back to hardcoded CHAPTERS")
+                print(f"[planner] WARN: planner returned None -- using hardcoded outline (generic LLM book)",
+                      flush=True)
 
     # Outline dedupe: inject 'already-introduced' directives into prompts where a
     # high-traffic concept (attention, scaling laws, RAG, ...) reappears across
@@ -1066,9 +1463,14 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         MODEL, batch, "on" if review else "off", research_label,
     ))
     if research_enabled:
-        print("  Research:  query/gen=%s  embed=%s  providers=%s" % (
+        # Rank13: log the EFFECTIVE provider list (after key/session-disable
+        # filtering), not just the configured one, so silent degradation
+        # (e.g. Tavily disabled with no key) is visible at startup.
+        effective = _research.search.available_providers(_research.PROVIDERS_DEFAULT)
+        print("  Research:  query/gen=%s  embed=%s  providers=%s (effective: %s)" % (
             _research.QUERY_GEN_MODEL, _research.EMBED_MODEL,
             ",".join(_research.PROVIDERS_DEFAULT),
+            ",".join(effective) or "NONE",
         ))
     print("=" * 70)
     print()
@@ -1101,7 +1503,10 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
     print()
 
     t0 = time.time()
-    for i, (ch_n, ch_t, pp_n, pp_t, prompt, budget) in enumerate(all_tasks):
+    section_vectors = []  # Rank7: (key, embedding) of finalized sections, for the content-dedup gate
+    for i, (ch_n, ch_t, pp_n, pp_t, prompt, _legacy_budget) in enumerate(all_tasks):
+        # W1: ignore _legacy_budget (the hardcoded 4200 from CHAPTERS). The
+        # real target is computed below from evidence count per section.
         key = "%d.%d" % (ch_n, pp_n)
         if key in state.get("passes", {}):
             print("[SKIP %d/%d] Ch%d.%d: %s -- DONE" % (i + 1, total, ch_n, pp_n, pp_t))
@@ -1126,21 +1531,89 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
 
         if research_enabled:
             current_hint = None
+            best_round = None  # Rank4: keep the highest-grounding round, not the last
+            # Track prior queries/sources across rounds to detect wasted re-search
+            prior_query_sigs: set[str] = set()
+            prior_source_ids: set[str] = set()
             for round_n in range(1, _research.MAX_RESEARCH_ROUNDS + 1):
                 t_r = time.time()
-                queries = _research.query_gen.queries_for(prompt, ch_t, pp_t, reviewer_hint=current_hint)
+                # Pass prior round state so query_gen can diversify
+                queries = _research.query_gen.queries_for(
+                    prompt, ch_t, pp_t, reviewer_hint=current_hint,
+                    prior_query_sigs=prior_query_sigs if round_n > 1 else None,
+                )
+                # Signature each query for overlap detection
+                q_sigs = set()
+                for q in queries:
+                    sig = (q.q.strip().lower()[:60], getattr(q, "intent", "unknown"))
+                    q_sigs.add(sig)
                 raw_sources = _research.search.gather(
                     queries, providers=_research.PROVIDERS_DEFAULT, per_provider_k=3,
                 )
+                # Guard: detect high source overlap between rounds to skip wasted re-search.
+                # If round 2 sees >60% of its sources already seen in round 1, it is
+                # unlikely to add novel coverage -- abort the round and ship best so far.
+                if round_n > 1 and raw_sources:
+                    seen_ids = prior_source_ids
+                    overlap_count = sum(
+                        1 for s in raw_sources
+                        if (getattr(s, "id", "") or "") in seen_ids
+                        or any((getattr(s, "url", "") or "") == prior_url
+                                for prior_url in seen_ids)
+                    )
+                    overlap_frac = overlap_count / len(raw_sources)
+                    print(f"  [OVERLAP r{round_n}] {overlap_count}/{len(raw_sources)} "
+                          f"({overlap_frac:.0%}) sources already seen in round 1")
+                    if overlap_frac > 0.6 and best_round is not None:
+                        print(f"  [OVERLAP r{round_n}] HIGH overlap — skipping round {round_n}, "
+                              "shipping best round so far")
+                        break
+                # Rank5: known-item retrieval. Resolve canonical paper/method names
+                # mentioned in this section to arxiv IDs and fetch them directly, so
+                # foundations (Vaswani, BERT, GPT-3, ...) are present even when the
+                # keyword search never surfaces them. Seeds are protected from the
+                # prefilter cosine gate and reserved by rank6's primary_floor.
+                seed_ids = _research.canonical_seeds.resolve_seeds(f"{pp_t}\n{prompt}")
+                seed_sources = _research.search.arxiv_by_id(seed_ids) if seed_ids else []
+                protected = {s.id for s in seed_sources}
+                if seed_sources:
+                    print(f"  [SEED] injected {len(seed_sources)} canonical paper(s): "
+                          + ", ".join(s.id for s in seed_sources))
+                raw_sources = seed_sources + raw_sources
                 # Prefilter: drop obviously off-topic + noisy-domain results BEFORE rank
                 # so the top-8 pool isn't polluted with YouTube/DDG/etc. false matches.
                 prefiltered = _research.notes.prefilter(
                     raw_sources, prompt, embed_model=_research.EMBED_MODEL,
+                    protected_ids=protected,
                 )
-                ranked = _research.notes.rank(
-                    prefiltered, prompt,
-                    top_k=_research.TOP_K_DEFAULT, embed_model=_research.EMBED_MODEL,
-                )
+                # v2 path: RRF fusion (sparse BM25 + dense cosine) for better recall
+                if _research.VFY_V2_AVAILABLE:
+                    ranked = _research.notes.rank_rrf(
+                        prefiltered, prompt,
+                        top_k=_research.TOP_K_RETRIEVE,
+                        embed_model=_research.EMBED_MODEL,
+                        primary_floor=_research.PRIMARY_FLOOR,
+                        protected_ids=protected,
+                    )
+                else:
+                    ranked = _research.notes.rank(
+                        prefiltered, prompt,
+                        top_k=_research.TOP_K_RETRIEVE,
+                        embed_model=_research.EMBED_MODEL,
+                        precomputed=True,
+                        primary_floor=_research.PRIMARY_FLOOR,
+                        protected_ids=protected,
+                    )
+
+                # v2: RRK reranking — cross-encoder replaces cosine as relevance gate
+                if _research.VFY_V2_AVAILABLE:
+                    try:
+                        ranked = _research.rerank.rerank(prompt, ranked, top_k=_research.TOP_K_FINAL)
+                        print(f"  [RRK] reranked to top-{len(ranked)} by cross-encoder")
+                    except Exception as e:
+                        print(f"  [RRK] failed ({e}), falling back to cosine top-8", flush=True)
+                        ranked = ranked[:_research.TOP_K_FINAL]
+
                 ranked = _research.notes.enrich_top_sources(
                     ranked, top_n=_research.FULL_TEXT_TOP_N, max_words_per=_research.FULL_TEXT_MAX_WORDS,
                 )
@@ -1150,45 +1623,182 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                       f"({wc(evidence_block)}w incl. {min(_research.FULL_TEXT_TOP_N, len(ranked))} full-text) "
                       f"in {time.time()-t_r:.1f}s")
 
+                # W1: target follows evidence -- N sources * 220w, capped at WORD_BUDGET.
+                target_words = compute_target_words(len(ranked), has_research=True)
+                print(f"  [W1] target={target_words}w (from {len(ranked)} evidence sources)")
+
                 content, stats, w = gen(
-                    client, ch_n, ch_t, pp_n, pp_t, prompt, budget,
+                    client, ch_n, ch_t, pp_n, pp_t, prompt, target_words,
                     context_block=context_block, evidence_block=evidence_block,
                 )
                 if not content:
                     break
 
-                # Drop any [N>len(ranked)] orphan citations the writer hallucinated.
+                # Drop orphan/out-of-range [N], N-prefixed placeholders ([N1],
+                # [N3,N7]), and provider-as-author attributions. Runs BEFORE
+                # verify so the judge scores the cleaned text.
                 content, n_dropped_cites = _research.notes.clean_citations(content, len(ranked))
                 if n_dropped_cites:
-                    print(f"  [CITE-FIXUP] dropped {n_dropped_cites} orphan [N>{len(ranked)}] markers")
+                    print(f"  [CITE-FIXUP] dropped {n_dropped_cites} bad citation markers/attributions")
+                # Telemetry guard: a citation-shaped [N..] surviving clean_citations
+                # means the cleaner regex has a gap -- surface it without eating
+                # legit math like [N=512]. (citation-shape = N + digits/commas only)
+                _resid = re.findall(r"\[\s*[Nn]\d*(?:\s*,\s*[Nn]?\d+)*\s*\]", content)
+                if _resid:
+                    print(f"  [CITE-GUARD] WARN residual placeholder survived cleaner: {_resid[:3]}")
 
                 t_v = time.time()
-                verify_res = _research.verify.verify_section(
-                    content, ranked, model=_research.JUDGE_MODEL,
-                )
+
+                    # v2: HHEM grounding + CRAG decision (cascaded: RRK already done above)
+                if _research.VFY_V2_AVAILABLE:
+                    try:
+                        from research import faithfulness as _f_mod
+                        # Decompose claims + HHEM grounding
+                        claims = _f_mod.decompose_claims(content, None)
+                        grounding_res = _f_mod.grounding_score(claims, ranked)
+                        round_idx_0 = round_n - 1  # 0-indexed
+
+                        verify_res = _research.verify.verify_section_v2(
+                            content, ranked,
+                            section_prompt=prompt,
+                            grounding_result=grounding_res,
+                            round_idx=round_idx_0,
+                            max_rounds=_research.MAX_RESEARCH_ROUNDS,
+                            llm_call_fn=None,  # answer_relevance/strip_refine use v1 judge
+                        )
+
+                        # CRAG decision
+                        crag = verify_res.get("crag_decision", "accept")
+                        print(f"  [VERIFY r{round_n}] v2 CRAG={crag} "
+                              f"grounding={verify_res.get('grounding', 0):.3f} "
+                              f"({verify_res.get('n_claims', 0)} claims, "
+                              f"{verify_res.get('n_supported', 0)} supported) "
+                              f"in {time.time()-t_v:.1f}s")
+
+                        # Backward-compat for state.json (same schema as v1)
+                        verify_res["grounding"] = verify_res.get("grounding", 0.0)
+                        verify_res["n_citations"] = len(claims)
+                        verify_res["verdicts"] = []
+                        verify_res["weak_citations"] = verify_res.get("weak_citations", [])
+                        verify_res["weak_summary"] = verify_res.get("weak_summary", "")
+                        # Override grounding for CRAG gate
+                        use_grounding = verify_res.get("grounding", 0.0)
+                    except Exception as e:
+                        print(f"  [VERIFY v2] failed ({e}), falling back to v1", flush=True)
+                        verify_res = _research.verify.verify_section(
+                            content, ranked, model=_research.JUDGE_MODEL,
+                        )
+                        use_grounding = verify_res["grounding"]
+                else:
+                    verify_res = _research.verify.verify_section(
+                        content, ranked, model=_research.JUDGE_MODEL,
+                    )
+                    use_grounding = verify_res["grounding"]
+
                 rounds_log.append({
                     "round": round_n,
                     "grounding": verify_res["grounding"],
-                    "n_citations": verify_res["n_citations"],
+                    "n_citations": verify_res.get("n_citations", verify_res.get("n_claims", 0)),
                     "n_weak": len(verify_res["weak_citations"]),
                 })
                 print(f"  [VERIFY r{round_n}] grounding={verify_res['grounding']:.2f} "
                       f"({verify_res['n_citations']} citations, {len(verify_res['weak_citations'])} weak) "
                       f"in {time.time()-t_v:.1f}s")
 
-                if verify_res["grounding"] >= _research.MIN_GROUNDING:
-                    break
-                if round_n >= _research.MAX_RESEARCH_ROUNDS:
-                    break
-                hint_src = verify_res.get("weak_summary") or "previous draft had unsupported citations"
-                current_hint = (
-                    f"Previous draft's citations did not match their sources: {hint_src}. "
-                    "Bias query generation toward canonical / primary sources for the specific claims that failed."
-                )
+                # Rank4: record this round as a candidate. "Better" = has citations
+                # beats zero-citations; tie-break by grounding. So a 0.16 round-1 with
+                # citations is never overwritten by a 0.0 round-2 with none.
+                cand = {
+                    "content": content, "w": w, "stats": stats, "ranked": ranked,
+                    "queries": queries, "verify": verify_res, "evidence": evidence_block,
+                }
+                def _round_score(c):
+                    g = c["verify"].get("grounding") or 0.0
+                    has_cites = (c["verify"].get("n_citations") or 0) > 0
+                    return (1 if has_cites else 0, g)
+                if best_round is None or _round_score(cand) > _round_score(best_round):
+                    best_round = cand
+
+                # Track query/source IDs for overlap detection in next round
+                prior_query_sigs.update(q_sigs)
+                for s in raw_sources:
+                    if getattr(s, "id", ""):
+                        prior_source_ids.add(getattr(s, "id", ""))
+                    elif getattr(s, "url", ""):
+                        prior_source_ids.add(getattr(s, "url", ""))
+
+                # v2 CRAG gate: 3-way decision replaces binary g < 0.55
+                if _research.VFY_V2_AVAILABLE:
+                    crag = verify_res.get("crag_decision", "accept")
+                    if crag == "accept":
+                        print(f"  [CRAG r{round_n}] accept — grounding={verify_res.get('grounding', 0):.3f}")
+                        break
+                    elif crag == "incorrect":
+                        if round_n < _research.MAX_RESEARCH_ROUNDS:
+                            hint_src = verify_res.get("weak_summary") or "previous draft had unsupported citations"
+                            current_hint = (
+                                f"Previous draft had low grounding (g={verify_res.get('grounding', 0):.3f}). "
+                                f"Weak claims: {hint_src}. Rewrite queries for primary sources."
+                            )
+                            print(f"  [CRAG r{round_n}] incorrect → re-search")
+                            continue
+                        else:
+                            print(f"  [CRAG r{round_n}] incorrect (final round) — accept to avoid loop")
+                            break
+                    else:  # ambiguous
+                        if round_n < _research.MAX_RESEARCH_ROUNDS:
+                            hint_src = verify_res.get("weak_summary") or "some claims partially supported"
+                            current_hint = (
+                                f"Partial grounding (g={verify_res.get('grounding', 0):.3f}). "
+                                f"Weak claims: {hint_src}. Add specific queries for weak areas."
+                            )
+                            print(f"  [CRAG r{round_n}] ambiguous → blend search + rewrite")
+                            continue
+                        else:
+                            break
+                else:
+                    # v1 binary gate
+                    if use_grounding >= _research.MIN_GROUNDING:
+                        break
+                    if round_n >= _research.MAX_RESEARCH_ROUNDS:
+                        break
+                    hint_src = verify_res.get("weak_summary") or "previous draft had unsupported citations"
+                    current_hint = (
+                        f"Previous draft's citations did not match their sources: {hint_src}. "
+                        "Bias query generation toward canonical / primary sources for the specific claims that failed."
+                    )
+            # Rank4: ship the BEST round, not whatever the loop happened to end on.
+            if best_round is not None:
+                content = best_round["content"]; w = best_round["w"]
+                stats = best_round["stats"]; ranked = best_round["ranked"]
+                queries = best_round["queries"]; verify_res = best_round["verify"]
+                evidence_block = best_round["evidence"]
+                if len(rounds_log) > 1:
+                    print(f"  [BEST-ROUND] shipped grounding={verify_res['grounding']:.2f} "
+                          f"({verify_res['n_citations']} cites) from the best of {len(rounds_log)} rounds")
+            # Lever 4 (Self-RAG-lite): scrub unsupported citations from the shipped content.
+            # Drops [N] markers rated 'unrelated' or 'no_evidence', keeps the claim.
+            if RESEARCH_AVAILABLE and verify_res:
+                try:
+                    scrubbed, n_scrubbed, abstain_note = (
+                        _research.verify.scrub_unsupported_citations(
+                            content, ranked, verify_res
+                        )
+                    )
+                    if n_scrubbed > 0:
+                        print(f"  [SELF-RAG] scrubbed {n_scrubbed} unsupported citation(s); "
+                              f"grounding improved from {verify_res['grounding']:.2f}")
+                        content = scrubbed
+                        if abstain_note:
+                            content += abstain_note
+                except Exception as e:
+                    print(f"  [SELF-RAG] scrub failed ({e}); keeping original content", flush=True)
         else:
             # No research layer -- straight gen as in legacy mode.
+            target_words = compute_target_words(0, has_research=False)
+            print(f"  [W1] target={target_words}w (no research)")
             content, stats, w = gen(
-                client, ch_n, ch_t, pp_n, pp_t, prompt, budget,
+                client, ch_n, ch_t, pp_n, pp_t, prompt, target_words,
                 context_block=context_block, evidence_block="",
             )
 
@@ -1223,16 +1833,87 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
                 regen_prompt = fix_hint + prompt
                 print(f"  [REVIEW] score {worst} < {MIN_REVIEW_SCORE} -- regenerating once")
                 content2, stats2, w2 = gen(
-                    client, ch_n, ch_t, pp_n, pp_t, regen_prompt, budget,
+                    client, ch_n, ch_t, pp_n, pp_t, regen_prompt, target_words,
                     context_block=context_block, evidence_block=evidence_block,
                 )
-                if content2 and w2 >= budget * 0.25:
+                if content2 and w2 >= max(200, int(target_words * 0.4)):
                     content, w = content2, w2
                     tokens = stats2.get("tokens", tokens)
                     tps = stats2.get("tps", tps)
                     elapsed_min = stats2.get("elapsed", 0) / 60
 
+        # Rank7: runtime content-similarity gate. Embed this section and compare
+        # to all prior sections; if cosine >= DUP_THRESHOLD it duplicates earlier
+        # material (bookv6 had 65 such pairs, incl a 5-way DPO/RLHF redefinition).
+        # Regenerate ONCE from a distinct angle. The repaired concept tracker +
+        # ALREADY-DEFINED list should make this fire rarely.
+        _DUP_THRESHOLD = 0.85
+        cur_vec = None
+        if RESEARCH_AVAILABLE and content:
+            try:
+                _vecs = _research.embeddings.embed([content[:1500]], model=_research.EMBED_MODEL)
+                cur_vec = _vecs[0] if _vecs else None
+            except Exception:
+                cur_vec = None
+            if cur_vec is not None and section_vectors:
+                _sims = [(_research.embeddings.cosine(cur_vec, pv), pk) for pk, pv in section_vectors]
+                max_sim, dup_key = max(_sims, key=lambda x: x[0])
+                if max_sim >= _DUP_THRESHOLD:
+                    print(f"  [DEDUP] Ch{ch_n}.{pp_n} cosine {max_sim:.2f} vs Ch{dup_key} -- regenerating distinct angle")
+                    avoid = (f"IMPORTANT: Chapter section Ch{dup_key} already covers very similar "
+                             "material. Write THIS section from a clearly DISTINCT angle: do not "
+                             "restate shared definitions -- reference them briefly and focus on what "
+                             "is unique to this section's specific title.\n\n")
+                    content2, stats2, w2 = gen(
+                        client, ch_n, ch_t, pp_n, pp_t, avoid + prompt, target_words,
+                        context_block=context_block, evidence_block=evidence_block,
+                    )
+                    if content2 and w2 >= max(200, int(target_words * 0.4)):
+                        if ranked:
+                            content2, _ = _research.notes.clean_citations(content2, len(ranked))
+                        content, w = content2, w2
+                        # Keep stats + verify aligned with the regenerated content
+                        # (else tokens/tps and grounding describe the discarded draft).
+                        tokens = stats2.get("tokens", tokens)
+                        tps = stats2.get("tps", tps)
+                        elapsed_min = stats2.get("elapsed", 0) / 60 or elapsed_min
+                        if ranked:
+                            try:
+                                verify_res = _research.verify.verify_section(
+                                    content, ranked, model=_research.JUDGE_MODEL)
+                            except Exception:
+                                pass
+                        try:
+                            _vecs = _research.embeddings.embed([content[:1500]], model=_research.EMBED_MODEL)
+                            cur_vec = _vecs[0] if _vecs else cur_vec
+                        except Exception:
+                            pass
+            if cur_vec is not None:
+                section_vectors.append((f"{ch_n}.{pp_n}", cur_vec))
+
         concepts = extract_concepts(content)
+        # Rank4: flag sections that shipped below a hard grounding floor or with
+        # zero citations despite having evidence, so downstream (eval/report) can
+        # surface them instead of them looking identical to good sections.
+        _g = (verify_res or {}).get("grounding")
+        _ncit = (verify_res or {}).get("n_citations", 0)
+        if sources_json and (_ncit == 0 or (_g is not None and _g < _research.MIN_GROUNDING)):
+            quality = "degraded"
+        else:
+            quality = "ok"
+        # Rank8: factual-attribution check (orthogonal to citation grounding).
+        # Flags wrong author/year for canonical methods (e.g. Chinchilla credited
+        # to Muennighoff). Advisory -- stored for eval/report, not a hard gate.
+        attribution_flags = []
+        if RESEARCH_AVAILABLE:
+            try:
+                attribution_flags = _research.canonical_seeds.check_attribution(content)
+            except Exception:
+                attribution_flags = []
+        if attribution_flags:
+            print(f"  [FACTCHECK] Ch{ch_n}.{pp_n} {len(attribution_flags)} attribution flag(s): "
+                  + "; ".join(f"{f['concept']}: said {f['found']}, expected {f['expected']}"
+                              for f in attribution_flags))
         state.setdefault("passes", {})[key] = {
             "ch": ch_n,
             "ch_t": ch_t,
@@ -1249,7 +1930,11 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
             "verify": verify_res,
             "research_rounds": rounds_log,
             "concepts": concepts,
+            "quality": quality,
+            "attribution_flags": attribution_flags,
         }
+        if quality == "degraded":
+            print(f"  [QUALITY] Ch{ch_n}.{pp_n} flagged degraded (grounding={_g}, citations={_ncit})")
         if concepts:
             print(f"  [CONCEPTS] extracted {len(concepts)}: " + ", ".join(concepts[:6]) +
                   ("..." if len(concepts) > 6 else ""))
@@ -1262,8 +1947,11 @@ def run(batch=2, start_ch=1, start_pp=1, end_ch=None, render=True, review=False,
         sys.stdout.flush()
 
         # Checkpoint every 2 tasks
+        # Rank13: checkpoint after EVERY section. The LLM call (~2-4min) dwarfs the
+        # 3.8MB state write (<0.1s), and the old every-2 cadence risked losing a
+        # finished section on a crash. Atomic write (W3) makes per-section safe.
+        save_state(state)
         if (i + 1) % 2 == 0:
-            save_state(state)
             elapsed = time.time() - t0
             remaining = total - done - (i + 1)
             est = remaining * elapsed / max(i + 1 - done, 1)

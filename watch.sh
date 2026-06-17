@@ -5,8 +5,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-STATE="files/output/state.json"
-STDOUT_LOG="files/output/pipeline.stdout.log"
+STATE="files/output/runs/book/state.json"
+STDOUT_LOG="files/output/runs/book/pipeline.stdout.log"
 
 clear
 echo "=================================================="

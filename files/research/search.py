@@ -32,15 +32,18 @@ TAVILY_TIMEOUT = 30.0
 BRAVE_API = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_TIMEOUT = 20.0
 
-# Session-level kill switch: once tavily returns HTTP 432 (rate-limit) we stop
+# Session-level kill switch: once tavily returns a recurring 4xx error we stop
 # calling it for the rest of the process so we don't burn ~30s/section retrying.
+# HTTP 432 = rate-limit; 402 = quota exceeded; 403 = forbidden/auth; 429 = too many.
 _TAVILY_DISABLED_THIS_SESSION = False
 _TAVILY_FAILURE_COUNT = 0
 _TAVILY_FAILURE_THRESHOLD = 3
+# Codes that indicate a recurring/retryable error (not transient).
+_TAVILY_RETRY_CODES = {402, 403, 429, 432}
 
 # Be polite -- arxiv ToS asks for >= 3s between requests.
 _LAST_ARXIV_CALL = 0.0
-ARXIV_MIN_INTERVAL = 3.0
+ARXIV_MIN_INTERVAL = 4.0  # bumped from 3.0 since arxiv_search now makes 2 calls/query
 
 
 def _excerpt(text: str, max_words: int = 80) -> str:
@@ -61,26 +64,60 @@ _ATOM_NS = {
 }
 
 
-def arxiv_search(query: str, k: int = 3) -> List[Source]:
-    """Query arxiv's Atom API. Returns up to k Sources with abstract excerpts."""
+# Two-phase arxiv search:
+#   Phase A: ti: (title-field) match -- biases toward canonical/foundational
+#            papers, whose titles tend to carry the technique name verbatim
+#            ("Attention Is All You Need", "Layer Normalization", "BERT: ...").
+#   Phase B: all: (relevance) match -- existing behavior, surfaces topically
+#            relevant papers including recent derivative work.
+# Phase-A hits are prepended so the prefilter/ranker sees them first; dedup
+# is by arxiv id. Eval (2026-05-27, transformer topic) confirmed phase A is
+# necessary -- without it, must_cite_recall was 0.0 on canonical papers
+# because relevance-ranking favored 2024 derivative papers over Vaswani 2017.
+
+_ARXIV_TITLE_STOPWORDS = {
+    "the", "a", "an", "of", "for", "in", "on", "and", "or", "with", "to",
+    "from", "using", "based", "into", "via", "by", "is", "are", "as",
+    "section", "write", "include", "cover",  # query-gen artifacts
+}
+
+
+def _arxiv_title_query(q: str) -> str:
+    """Reduce a free-text query to a tight title-field arxiv query.
+
+    arxiv's ti: field needs short keyword runs to be useful -- long natural
+    sentences match almost nothing. We strip stopwords and cap at 4 terms.
+    Returns "" if too few signal terms survive (caller should skip phase A).
+    """
+    import re as _re
+    tokens = [w for w in _re.findall(r"[A-Za-z][A-Za-z0-9-]+", q.lower())
+              if w not in _ARXIV_TITLE_STOPWORDS and len(w) > 2]
+    if len(tokens) < 2:
+        return ""
+    return " ".join(tokens[:4])
+
+
+def _arxiv_raw_query_params(extra: dict) -> List[Source]:
+    """Single arxiv API call with arbitrary params (search_query OR id_list)."""
+    if not _ARXIV_AVAILABLE:
+        return []
     global _LAST_ARXIV_CALL
     elapsed = time.time() - _LAST_ARXIV_CALL
     if elapsed < ARXIV_MIN_INTERVAL:
         time.sleep(ARXIV_MIN_INTERVAL - elapsed)
     _LAST_ARXIV_CALL = time.time()
 
-    params = urllib.parse.urlencode({
-        "search_query": f"all:{query}",
-        "start": 0,
-        "max_results": k,
-        "sortBy": "relevance",
-        "sortOrder": "descending",
-    })
+    base = {"start": 0, "max_results": 5, "sortBy": "relevance", "sortOrder": "descending"}
+    # id_list queries must NOT carry sortBy=relevance with no search_query.
+    if "id_list" in extra:
+        base.pop("sortBy", None)
+        base.pop("sortOrder", None)
+    base.update(extra)
+    params = urllib.parse.urlencode(base)
     url = f"{ARXIV_API}?{params}"
     rec = fetch(url, accept="application/atom+xml")
     if not rec or rec.get("status", 0) >= 400 or not rec.get("content"):
         return []
-
     try:
         root = ET.fromstring(rec["content"])
     except ET.ParseError:
@@ -119,6 +156,49 @@ def arxiv_search(query: str, k: int = 3) -> List[Source]:
             year=year,
         ))
     return out
+
+
+def _arxiv_raw_query(search_query: str, k: int) -> List[Source]:
+    """Keyword arxiv query (ti:/all:). Thin wrapper over _arxiv_raw_query_params."""
+    return _arxiv_raw_query_params({"search_query": search_query, "max_results": k})
+
+
+def arxiv_by_id(arxiv_ids) -> List[Source]:
+    """Fetch specific arxiv papers by id (Rank5 canonical-seed retrieval).
+
+    Uses the arxiv API id_list param so a named canonical paper is retrieved
+    directly instead of hoping a keyword search surfaces it.
+    If arxiv.org is unreachable, returns an empty list."""
+    if not _ARXIV_AVAILABLE:
+        return []
+    # Strip "arxiv:" prefix and "vN" version suffix from IDs
+    ids = [re.sub(r"^arxiv:", "", str(i).strip()) for i in (arxiv_ids or []) if i]
+    ids = [re.sub(r"v\d+$", "", i) for i in ids]
+    ids = [i for i in ids if i]
+    if not ids:
+        return []
+    return _arxiv_raw_query_params({"id_list": ",".join(ids), "max_results": len(ids)})
+
+
+def arxiv_search(query: str, k: int = 3) -> List[Source]:
+    """Two-phase arxiv search: title-field (canonical bias) then all-field."""
+    if not _ARXIV_AVAILABLE:
+        return []
+    # Phase A: title-field match -- canonical-paper bias.
+    title_q = _arxiv_title_query(query)
+    title_hits = _arxiv_raw_query(f"ti:{title_q}", k=max(2, k)) if title_q else []
+    # Phase B: original all-field relevance search.
+    all_hits = _arxiv_raw_query(f"all:{query}", k=k)
+    # Merge: title-hits first so canonical papers are seen by the ranker
+    # before recent derivatives. Dedup by arxiv id.
+    seen: set[str] = set()
+    merged: List[Source] = []
+    for s in title_hits + all_hits:
+        if s.id in seen:
+            continue
+        seen.add(s.id)
+        merged.append(s)
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -216,17 +296,19 @@ def tavily_search(query: str, k: int = 5, depth: str = "advanced") -> List[Sourc
             data = r.json()
         _TAVILY_FAILURE_COUNT = 0
     except httpx.HTTPStatusError as e:
-        if e.response.status_code == 432:
+        status = e.response.status_code
+        if status in _TAVILY_RETRY_CODES:
             _TAVILY_FAILURE_COUNT += 1
             if _TAVILY_FAILURE_COUNT >= _TAVILY_FAILURE_THRESHOLD:
                 _TAVILY_DISABLED_THIS_SESSION = True
-                print(f"[research/search] tavily rate-limit (HTTP 432) hit {_TAVILY_FAILURE_THRESHOLD}x -- "
+                print(f"[research/search] tavily HTTP {status} hit {_TAVILY_FAILURE_THRESHOLD}x -- "
                       "auto-disabled for this session. Re-enable by restarting the process.",
                       flush=True)
             else:
-                print(f"[research/search] tavily 432 ({_TAVILY_FAILURE_COUNT}/{_TAVILY_FAILURE_THRESHOLD})", flush=True)
+                print(f"[research/search] tavily HTTP {status} ({_TAVILY_FAILURE_COUNT}/"
+                      f"{_TAVILY_FAILURE_THRESHOLD})", flush=True)
         else:
-            print(f"[research/search] tavily HTTP {e.response.status_code}: {e}", flush=True)
+            print(f"[research/search] tavily HTTP {status}: {e}", flush=True)
         return []
     except Exception as e:
         print(f"[research/search] tavily failed: {e}", flush=True)
@@ -316,9 +398,16 @@ def brave_search(query: str, k: int = 5) -> List[Source]:
 # DuckDuckGo HTML (zero-key fallback, free)
 # ---------------------------------------------------------------------------
 
+# DuckDuckGo HTML structure shifts frequently. We use two fallback patterns:
+# Primary: class="result__a" for links + class="result__snippet" for excerpts.
+# Fallback: open-search <a> tags with data-testid="result-extras-url-link".
 _DDG_RESULT_RE = re.compile(
-    r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
-    r'.*?<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+    r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>.*?</a>'
+    r'.*?<a[^>]+class="result__snippet"[^>]*>(.*?)</a>',
+    re.DOTALL,
+)
+_DDG_FALLBACK_RE = re.compile(
+    r'<a[^>]+class="[^"]*result[^"]*"[^>]+href="(https?://[^"]+)"[^>]*>([^<]{5,100}?)</a>',
     re.DOTALL,
 )
 
@@ -328,18 +417,49 @@ def ddg_search(query: str, k: int = 3) -> List[Source]:
     rec = fetch(f"{DDG_HTML}?q={urllib.parse.quote(query)}", accept="text/html")
     if not rec or rec.get("status", 0) >= 400:
         return []
+    html = rec["content"]
     out: List[Source] = []
-    for m in _DDG_RESULT_RE.finditer(rec["content"]):
-        url, title_html, snippet_html = m.group(1), m.group(2), m.group(3)
-        title = re.sub(r"<[^>]+>", "", title_html).strip()
+    seen_urls: set = set()
+
+    # Primary: try the structured result class first
+    for m in _DDG_RESULT_RE.finditer(html):
+        url, snippet_html = m.group(1), m.group(2)
+        title = re.sub(r"<[^>]+>", "", html[m.start():m.end()]).strip()
+        title = re.sub(r"<[^>]+>", "", title)
         snippet = re.sub(r"<[^>]+>", "", snippet_html).strip()
-        if not title or not url.startswith("http"):
+        # DDG uses protocol-relative URLs: //example.com/... -> https://example.com/...
+        if not url:
             continue
+        if url.startswith("//"):
+            url = "https:" + url
+        if not (url.startswith("http") or url.startswith("https")):
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
         out.append(Source(
-            id=f"ddg:{hash(url) & 0xFFFFFF:06x}",
-            title=title,
+            id=f"ddg:{abs(hash(url)) & 0xFFFFFF:06x}",
+            title=title[:200] if title else url,
             url=url,
             excerpt=_excerpt(snippet, max_words=80),
+            provider="ddg",
+            authors=[],
+            year=None,
+        ))
+        if len(out) >= k:
+            return out
+
+    # Fallback: open-search links (handles when DDG HTML structure shifts)
+    for m in _DDG_FALLBACK_RE.finditer(html):
+        url, title = m.group(1), m.group(2).strip()
+        if not url or url in seen_urls or "duckduckgo" in url.lower():
+            continue
+        seen_urls.add(url)
+        out.append(Source(
+            id=f"ddg:{abs(hash(url)) & 0xFFFFFF:06x}",
+            title=title[:200] if title else url,
+            url=url,
+            excerpt=_excerpt(title, max_words=80),
             provider="ddg",
             authors=[],
             year=None,
@@ -362,19 +482,42 @@ _PROVIDER_FUNCS = {
 }
 
 
+def _arxiv_reachable() -> bool:
+    """Check if arxiv.org is reachable within 5 seconds."""
+    import socket as _socket
+    try:
+        _socket.create_connection(("export.arxiv.org", 443), timeout=5)
+        return True
+    except Exception:
+        return False
+
+
+_ARXIV_AVAILABLE: bool = _arxiv_reachable()
+if not _ARXIV_AVAILABLE:
+    import sys as _sys
+    print("[search] arxiv.org unreachable -- auto-disabled for this session",
+          file=_sys.stderr, flush=True)
+
+
 def available_providers(requested: Iterable[str]) -> List[str]:
     """Filter requested providers down to ones whose prerequisites are met.
 
-    `tavily` needs TAVILY_API_KEY AND must not be session-disabled (rate-limit).
-    `brave`  needs BRAVE_API_KEY.
-    arxiv / wikipedia / ddg have no creds.
+    `tavily` needs TAVILY_ENABLED=1, a valid TAVILY_API_KEY, AND must not be
+    session-disabled (rate-limit/402). `brave` needs BRAVE_API_KEY.
+    arxiv / wikipedia / ddg have no creds. arxiv is auto-disabled if unreachable.
     """
+    import os as _os
+    tavily_enabled = _os.environ.get("TAVILY_ENABLED", "0").strip().lower() in ("1", "true", "yes")
     out = []
     for p in requested:
         if p == "tavily":
+            if not tavily_enabled:
+                continue
             if not _tavily_api_key() or _TAVILY_DISABLED_THIS_SESSION:
                 continue
         elif p == "brave" and not _brave_api_key():
+            continue
+        elif p == "arxiv" and not _ARXIV_AVAILABLE:
             continue
         if p in _PROVIDER_FUNCS:
             out.append(p)
