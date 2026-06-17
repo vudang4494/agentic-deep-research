@@ -68,6 +68,40 @@ HHEM_DEVICE = "cpu"    # MPS can be used if GPU memory available; CPU is reliabl
 _hhem = None
 
 
+def _retie_hhem_embeddings(model) -> bool:
+    """ROOT FIX for the degenerate scorer: transformers>=5.x + the `all_tied_weights_keys={}` compat
+    patch DISABLE T5 weight-tying. The HHEM checkpoint ships only the tied `shared` embedding, so
+    `encoder.embed_tokens.weight` loads as ALL-ZEROS -> the encoder sees zero input embeddings ->
+    constant output -> predict() returns the bit-identical constant ~0.502 for EVERY pair, making
+    Gate D a no-op. Re-point embed_tokens at the loaded `shared` weight to restore real scores.
+    Verified: re-tie turns a true/false/unrelated battery from [0.502,0.502,0.502] into
+    [0.894,0.018,0.014]. (See files/eval/bench_hhem_discrimination.py.)"""
+    try:
+        tr = model.t5.transformer
+        shared = tr.shared.weight
+        if hasattr(tr, "encoder") and float(tr.encoder.embed_tokens.weight.std()) == 0.0:
+            tr.encoder.embed_tokens.weight = shared
+        if hasattr(tr, "decoder") and float(tr.decoder.embed_tokens.weight.std()) == 0.0:
+            tr.decoder.embed_tokens.weight = shared
+        return True
+    except Exception as e:
+        print(f"[faithfulness] HHEM embedding re-tie skipped: {e}", flush=True)
+        return False
+
+
+def _hhem_discriminates(model) -> bool:
+    """Startup assertion: a TRUE claim must score clearly above a FALSE one. Guards against a silently
+    degenerate scorer (broken tying / future regression) turning Gate D back into a no-op."""
+    try:
+        t, f = (float(x) for x in model.predict([
+            ("The sky is blue.", "The sky is blue."),
+            ("The sky is blue.", "The sky is green and red."),
+        ]))
+        return (t - f) > 0.2
+    except Exception:
+        return True  # never block the pipeline on a probe failure
+
+
 def _get_hhem():
     """Lazy-load HHEM model. Call once per process."""
     global _hhem
@@ -88,6 +122,11 @@ def _get_hhem():
         trust_remote_code=True,
         device_map=HHEM_DEVICE,
     )
+    _retie_hhem_embeddings(_hhem)
+    if not _hhem_discriminates(_hhem):
+        print("[faithfulness] WARNING: HHEM still degenerate after re-tie -- grounding (Gate D) is a "
+              "NO-OP; rely on G2 cite_precision + G4 topic. Verify with bench_hhem_discrimination.py.",
+              flush=True)
     return _hhem
 
 
