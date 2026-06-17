@@ -1,254 +1,169 @@
-# agentic
+# agentic — Local-first Agentic Deep Research
 
-> **Local-first Agentic Deep Research platform.** Hand it a topic; it discovers the
-> outline from research, runs ~100 atomic *research → write → verify* rounds, and
-> assembles a 300-400+ page, LaTeX-typeset technical book with a single deduplicated
-> References page — all on your laptop, no API key required.
+> Hand it a topic. It **discovers** the scope, lets the **outline emerge from the evidence**, then runs
+> a per-section **research → rank → gate → write → verify** loop and assembles a LaTeX-typeset technical
+> book — **100% on local models, no API key, every claim gated and auditable.**
 
 <p align="left">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="python"  src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
-  <img alt="runtime" src="https://img.shields.io/badge/runtime-Ollama-black.svg">
+  <img alt="runtime" src="https://img.shields.io/badge/runtime-Ollama%20(local)-black.svg">
   <img alt="render"  src="https://img.shields.io/badge/render-tectonic%20%2F%20WeasyPrint-orange.svg">
-  <img alt="status"  src="https://img.shields.io/badge/status-v3%20smoke--tested-success.svg">
+  <img alt="status"  src="https://img.shields.io/badge/status-full--run%20validated-success.svg">
 </p>
 
-**Tiered model stack:**
-
-| Tier | Role | Model | Why |
-|------|------|-------|-----|
-| **Fast (research)** | QGN, VFY, RSR | `gemma4:e4b` | 12B dense, 6.4 GB, fast inference |
-| **Quality (writing)** | WRT, PLN, RVW | `batiai/qwen3.6-35b:iq3` | MoE 35B/3B, best prose quality |
-| Embedding | RSR rank | `bge-m3:latest` | dense retrieval |
-
-Providers: arXiv + Wikipedia + DDG. Provider-agnostic — swap in any OpenAI-compatible endpoint.
+It is **not** a text generator. The goal is an on-topic, grounded, **auditable** book: drift, repetition,
+and ungrounded claims are blocked at gates, not patched in the writer.
 
 ---
 
-## Highlights
+## See it in action
 
-| Capability | What ships today |
-|---|---|
-| **True Deep Research (v3)** | Outline emerges from evidence, not pre-planned |
-| **Local-first** | Ollama-served LLMs only (tiered: gemma-4 research + qwen3.6 writer) |
-| **Multi-provider retrieval** | arXiv + Wikipedia + DDG, all gated by env vars |
-| **Full-text grounding** | top-2 sources per section get a 350-word body extract |
-| **Self-critique** | HHEM-as-judge scores per-`[N]` citation grounding and triggers re-search |
-| **Iterative loop** | low-grounding sections re-query with hint, capped at 2 rounds |
-| **Concept discovery** | every section discovers new concepts; outline can grow dynamically |
-| **LaTeX-quality PDF** | renders via `tectonic` with WeasyPrint fallback |
-| **Resume-safe** | per-section state checkpoint, autonomous watchdog with Ollama health checks |
+A real end-to-end result is committed so you can judge it by the output, not the claims:
 
-See [WORKPLAN.md](WORKPLAN.md) for roadmap and architecture notes.
+**[`files/output/runs/agentic_2025_full/`](files/output/runs/agentic_2025_full/)**
+- [`book.pdf`](files/output/runs/agentic_2025_full/book.pdf) — **605 pages**, tectonic-typeset math, per-section references.
+- [`book_eval_report.md`](files/output/runs/agentic_2025_full/book_eval_report.md) — the **BAER** transparent quality report (deterministic, reproducible).
+- [`README.md`](files/output/runs/agentic_2025_full/README.md) — how it was generated + honest caveats.
+
+Headline numbers (BAER): 288 sections · ~258k words · **0 near-duplicate sections** · **90% of sections carry a formula** · coverage 6/6 must-cover + 10/10 canonical terms · references 78.5% on-topic.
+
+---
+
+## Model stack (all local, via Ollama + transformers)
+
+| Role | Model | Notes |
+|------|-------|-------|
+| Discovery / Outline / Query-gen / **Judge** | `gemma4:e4b` | topic profile, evidence-driven outline, query gen, topic + citation judges |
+| **Writer** | `batiai/qwen3.6-35b:iq3` | prose + formulas + algorithms, grounded in cited evidence |
+| Embedding (retrieval + verify) | `bge-m3:latest` | unified dense retrieval / dedup / cosine prefilter |
+| Rerank | `BAAI/bge-reranker-v2-m3` | cross-encoder (transformers, not Ollama) |
+| Grounding | `vectara/hallucination_evaluation_model` (HHEM v2) | per-claim entailment |
+
+> **Invariant — Verifier ≠ Writer:** the writer is **qwen**; grounding is scored by **HHEM** and
+> topic/citation by **gemma**. The writer never grades its own prose (no self-preference bias).
+> **LOCAL-ONLY:** every model runs on `localhost` — no Claude/OpenAI/external API at runtime.
+
+---
+
+## Pipeline
+
+![pipeline](pipeline.jpg)
+
+```
+Topic ─▶ Discovery ─▶ Outline (from evidence) ─▶ Deep Investigation (per section) ─▶ Assemble ─▶ Render
+```
+
+| # | Stage | Model | What happens |
+|---|-------|-------|--------------|
+| 0 | **Discovery** | gemma4:e4b | scoping queries → `TopicProfile` (canonical terms, must-cover, out-of-scope) + **P0b** canonical-paper injection |
+| 1 | **Outline** | gemma4:e4b | **chunked** drafting — chapter skeleton, then per-chapter sections that *emerge from that chapter's evidence* (kills the archetype "matrix") |
+| 2 | **Deep Investigation** (loop, per section) | ↓ | query-gen → search (arXiv/Wikipedia/DDG) → cosine **prefilter** → RRF rank + cross-encoder rerank → **gates** → write → **verify** |
+| 3 | **Assemble** | — | `book.md` + math hygiene (single-source [`research/mathfix.py`](files/research/mathfix.py)) + per-section references |
+| 4 | **Render** (`--render`) | — | pandoc → **tectonic** (LaTeX, `-Z continue-on-errors`); WeasyPrint fallback |
+
+### The gates (where quality is actually enforced)
+- **P0a** domain gate — hard-blocks a section whose evidence is off-domain (≈0.40), instead of letting the writer drift.
+- **P0b** canonical inject / **P0c** seen-penalty — foundational papers are protected (exempt from prefilter + dedup); over-represented sources are penalized.
+- **Prefilter** — drop sources below cosine **0.48** to the section (grey domains 0.65); canonical exempt.
+- **Accept a section only if:** grounding ≥ **0.70** (G3, HHEM) **AND** topic ≥ **0.50** (G4, gemma) **AND** cite-precision ≥ **0.45** (G2, gemma) **AND** n_cites > 0 **AND** cross-refs satisfied — else **hard-block** (no drift shipped).
+
+> Thresholds live in **code** (`deep_investigate.py`, `notes.py`, `config.py`), not docs — see [RULES.md](RULES.md) for the full table.
+
+---
+
+## Quality eval — BAER (transparent, deterministic)
+
+Judge any finished run by numbers, not adjectives:
+
+```bash
+python3 files/eval/benchmark_book.py <run-name>   # -> book_eval_report.md + book_eval.json
+```
+
+**B**enchmark (pages/words/citations) · **A**nalyze (cross-section redundancy, anti-matrix, reference
+on-topic %, coverage, technical-depth %) · **E**val (gates labelled **real vs inert**) · **R**eport.
+Calls no model → same run always yields the same report. Companion probes:
+`bench_hhem_discrimination.py` (grounding scorer health), `bench_math_split_bm25.py` (math/BM25 safety).
 
 ---
 
 ## Quick start
 
 ```bash
-# 1. Install Ollama + pull models
-brew install ollama
-ollama serve &
-ollama pull gemma4:e4b     # fast research model (QGN, VFY)
-ollama pull batiai/qwen3.6-35b:iq3  # best prose model (WRT, PLN)
-ollama pull bge-m3:latest            # embedder
+# 1. Local models (Ollama)
+brew install ollama && ollama serve &
+ollama pull gemma4:e4b
+ollama pull batiai/qwen3.6-35b:iq3
+ollama pull bge-m3:latest
 
-# 2. Python deps
+# 2. Python deps + render toolchain
 pip install -r files/requirements.txt
-brew install pandoc tectonic    # tectonic for paper-quality LaTeX PDF render
+brew install pandoc tectonic          # tectonic = paper-quality LaTeX PDF
 
-# 3. (optional) web-search keys
-cp .env.example .env
-# fill in TAVILY_API_KEY -- pipeline degrades gracefully without
+# 3. (optional) extra web search — degrades gracefully without
+cp .env.example .env                  # add TAVILY_API_KEY if you have one
 
-# 4. Run v3 (outline-from-research, smoke test: 2 chapters)
-python3 files/deep_research_v3.py --topic "Diffusion Models" --out-name diffusion_v3
+# 4. Run (smoke = first 2 chapters; --no-smoke = full book)
+python3 files/deep_research_v3.py --topic "RLHF" --out-name rlhf_v4 \
+  --canonical-arxiv-ids "2203.02155,2305.18290,1706.03762" --no-smoke --render
+#   or: ./run_full.sh
 
-#    or full run (all chapters)
-python3 files/deep_research_v3.py --topic "Diffusion Models" \
-  --out-name diffusion_v3 --no-smoke
-
-#    or v2 (pre-planned outline, shipped)
-./run.sh
-
-# 5. Kill
-pkill -f files/runner.py && pkill -f files/deep_research.py
+# 5. Evaluate the result
+python3 files/eval/benchmark_book.py rlhf_v4
 ```
 
-Each run lands in `files/output/runs/<out-name>/` as `book.{md,pdf}` (plus `state.json`,
-`topic_profile.json`, `outline_profile.json`, and logs).
+Each run lands in `files/output/runs/<out-name>/` (`book.{md,pdf}`, `book_eval_report.md`,
+`state.json`, `topic_profile.json`, `outline_profile.json`). Runs are **resume-safe** — re-running
+continues from `state.json` and never rewrites an accepted section.
 
----
-
-## Pipeline v3 (outline-from-research)
-
-```
-Topic
-  │
-  v
-.------------------------------------------------------.
-| Stage 0: DISCOVER  (gemma-4-12b)                     |
-|   3 broad scoping queries -> ~20 sources              |
-|   -> LLM synthesizes TopicProfile                   |
-'------------------------------------------------------'
-  │
-  v
-.------------------------------------------------------.
-| Stage 1: OUTLINE FROM RESEARCH                        |
-|   LLM reads gathered sources -> hierarchical outline |
-|   (outline is an OUTPUT, not INPUT)                  |
-'------------------------------------------------------'
-  │
-  v
-.------------------------------------------------------.
-| Stage 2: INVESTIGATE  (per section)                 |
-|   (1) QGN -> 3-5 search queries                      |
-|   (2) RSR gather (arxiv/wiki/ddg)                   |
-|   (3) Rank top-k (RRF + RRK)                        |
-|   (4) Full-text enrich (top-2, 350w)                |
-|   (5) WRT -> markdown with [N] citations            |
-|   (6) VFY (HHEM grounding)                          |
-|   (7) if g < 0.55: retry with refined queries       |
-'------------------------------------------------------'
-  │
-  v
-.------------------------------------------------------.
-| Stage 3: ASSEMBLE -> book.md -> PDF                  |
-'------------------------------------------------------'
-```
-
----
-
-## Pipeline v2 (pre-planned outline)
-
-```
-topic str ---> Planner agent (batiai/qwen3.6-35b:iq3 + scoping research)
-                 -> 12-chapter outline JSON (self-corrected)
-                 -------------------------------------------------------
-per section -> (1) QGN -> 3-5 search queries (JSON)
-               (2) Multi-provider search (arxiv/wiki/ddg)
-               (3) Prefilter (bge-m3 cosine + domain noise)
-               (4) Rank top-k (RRF + RRK cross-encoder)
-               (5) Full-text enrich (top-2, 350w)
-               (6) Writer (batiai/qwen3.6-35b:iq3)
-               (7) Sanitize + math normalize + clean_citations
-               (8) VFY (HHEM grounding)
-               (9) if g < 0.55 AND round < 2: re-query -> back to (2)
-                 -------------------------------------------------------
-assemble -> book.md + dedup'd References -> PDF (tectonic)
-```
-
----
-
-## CLI reference
-
-### v3 (outline-from-research)
-
-```bash
-python3 files/deep_research_v3.py [OPTIONS]
-```
+### CLI (orchestrator v3)
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--topic` | required | Research topic |
-| `--out-name` | from topic | Output folder name |
-| `--n-chapters N` | 12 | Number of chapters |
-| `--sections-per-chapter N` | 8 | Sections per chapter |
-| `--providers arxiv wikipedia ddg` | all 3 | Research providers |
-| `--max-rounds N` | 2 | Max research rounds per section |
-| `--no-smoke` | smoke (2 ch) | Run full pipeline |
-| `--render` | off | Generate PDF |
-
-### v2 (pre-planned outline)
-
-```bash
-python3 files/deep_research.py [OPTIONS]
-```
-
-| Flag | Default | Effect |
-|------|---------|--------|
-| `--topic "..."` | hardcoded LLM outline | Stage 3 planner generates outline |
-| `--n-chapters N` | 12 | Number of chapters |
-| `--n-passes N` | 8 | Sections per chapter |
-| `--start-ch N` | 1 | Resume from chapter N |
-| `--start-pp N` | 1 | Resume from section N |
-| `--end-ch N` | none | Stop after chapter N |
-| `--review` | off | LLM-as-judge prose review |
-| `--no-render` | render on | Skip PDF |
-| `--out-name X` | book | Run name |
+| `--out-name` | from topic | Output folder |
+| `--n-chapters N` / `--sections-per-chapter N` | from discovery | Outline size hints |
+| `--canonical-arxiv-ids "id,id"` | none | Force-inject + protect foundational papers (P0b) |
+| `--providers arxiv wikipedia ddg` | all 3 | Retrieval providers |
+| `--max-rounds N` | 3 | Max research rounds per section |
+| `--no-smoke` | smoke (2 ch) | Run the full book |
+| `--render` | off | Render PDF |
 
 ---
 
-## Environment variables
-
-| Variable | Effect |
-|---|---|
-| `TAVILY_API_KEY` | Enable Tavily web search (free 1000/mo at tavily.com) |
-| `DEEP_RESEARCH_WRITER_MODEL` | Override writer model |
-| `DEEP_RESEARCH_REVIEW=1` | Enable review pass |
-| `DEEP_RESEARCH_END_CH` | Stop after this chapter |
-
----
-
-## File layout
+## Repo layout
 
 ```
 files/
-├── deep_research.py          # v2: pre-planned outline (shipped)
-├── deep_research_v3.py      # v3: outline-from-research (smoke tested)
-├── runner.py               # watchdog + auto-restart
-├── monitor.py              # progress CLI
-├── research/               # research layer
-│   ├── discovery.py        # v3: topic scoping
-│   ├── outline_from_research.py  # v3: outline from evidence
-│   ├── deep_investigate.py      # v3: per-section research
-│   ├── search.py          # provider adapters (arxiv/wiki/ddg/tavily)
-│   ├── query_gen.py       # query generator
-│   ├── notes.py           # RRF rank + format evidence
-│   ├── embeddings.py      # bge-m3 batched + cosine
-│   ├── fetch.py           # disk-cached HTTP fetcher
-│   ├── verify.py          # VFY (grounding judge)
-│   ├── faithfulness.py    # HHEM v2 grounding
-│   ├── rerank.py          # RRK cross-encoder
-│   ├── planner.py         # PLN (v2 outline generator)
-│   └── types.py           # Source + Query dataclasses
-├── eval/                  # evaluation
-│   ├── paper_eval.py      # paper-quality eval
-│   └── reports/           # eval outputs (gitignored)
-├── memory/                # agent memory
-│   ├── short-memory.md    # version changelog
-│   └── long-memory.md     # session journal
-└── output/
-    └── runs/<name>/       # per-run output (gitignored)
+├── deep_research_v3.py         # orchestrator (LIVE) — run_v3()
+├── deep_research.py            # legacy v2 (pre-planned outline; not the live path)
+├── research/
+│   ├── discovery.py            # Stage 0 — TopicProfile + P0b canonical inject
+│   ├── outline_from_research.py# Stage 1 — chunked, evidence-driven outline
+│   ├── deep_investigate.py     # Stage 2 — per-section research/gate/write/verify loop
+│   ├── query_gen.py · query_router.py · search.py · rerank.py
+│   ├── notes.py                # RRF rank + P0a/P0c gates + prefilter + math-safe BM25
+│   ├── faithfulness.py         # G3 grounding (HHEM)
+│   ├── verify.py               # G4 topic + G2 citation (gemma), cross-ref
+│   ├── mathfix.py              # single-source math/LaTeX normalization (render-safe)
+│   ├── embeddings.py · fetch.py · config.py · canonical_seeds.py · types.py
+├── eval/
+│   ├── benchmark_book.py       # BAER quality report
+│   ├── bench_hhem_discrimination.py · bench_math_split_bm25.py
+│   └── test_math_char_safety.py · test_verify_optim.py
+├── scripts/render_book.py      # Stage 4 — pandoc + tectonic / weasyprint
+└── output/runs/<name>/         # per-run output (the committed example lives here)
 ```
 
----
-
-## How it stays grounded
-
-1. **Zero-citation penalty** — `grounding = 0.0` when evidence was provided but no `[N]`
-   markers are emitted, forcing the writer to cite or hedge.
-2. **HHEM v2 grounding** — each `[N]` claim fed to vectara/hallucination_evaluation_model
-   (flan-t5-base); returns supports/partial/contradicts/unrelated.
-3. **Source noise** — bge-m3 cosine prefilter drops anything below 0.30 similarity,
-   stricter 0.55 for noisy-domain hits.
-4. **RRF + RRK** — Reciprocal Rank Fusion (sparse BM25 + dense cosine) followed by
-   cross-encoder reranking for top-8 candidates.
-5. **Off-by-one citations** — `clean_citations()` strips `[N>max]` orphans post-write.
+Operational doctrine: [CLAUDE.md](CLAUDE.md) (pipeline + invariants) · [RULES.md](RULES.md) (gate/threshold table) · [files/GLOSSARY.md](files/GLOSSARY.md) (terms).
 
 ---
 
-## Roadmap
-
-| Stage | Description | Status |
-|-------|-------------|--------|
-| 0-1 | Atomic generator + continuity + reviewer | shipped |
-| 2 | Researcher layer (search + retrieval + citations) | shipped |
-| 2+ | Tavily + full-text + verifier + iterative loop | shipped |
-| 3 | Planner agent + outline self-correction | shipped |
-| **v3** | **True Deep Research (outline from evidence)** | **smoke tested** |
-| 4 | Multi-agent split (parallel sections) | planned |
-| 5 | Citation-graph + second-hop retrieval | planned |
+## Notable fixes that make it auditable
+- **Grounding revived** — HHEM was a no-op under transformers 5.x (T5 `embed_tokens` loaded as zeros → constant ~0.502 for every pair). Fixed by re-tying embeddings in `_get_hhem` + a startup discrimination-assertion. No version pin.
+- **Outline emerges from evidence** — chunked drafting replaces the single giant-JSON call that overflowed the model and fell back to a templated topic×archetype matrix.
+- **Render never dies on one bad formula** — `mathfix` neutralizes broken LaTeX spans to literal, escapes raw `%`/stray `$`, bounds unbalanced-brace paragraphs, and is idempotent; tectonic renders a 250k-word book directly.
+- **No internal logs leak into the book**; raw `[N]` citations resolve to per-section references.
 
 ---
 
