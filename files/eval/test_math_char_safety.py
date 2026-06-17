@@ -102,6 +102,19 @@ def test_mathfix_render_safety():
     check("normalize_math idempotent", normalize_math(once) == once, once)
 
 
+def test_bm25_math_safe():
+    # Rank6: the BM25 sparse tokenizer must NOT index LaTeX-command junk (frac/sqrt/mathrm/sum...)
+    # which would inflate similarity between any two formula-heavy sections. Prose terms survive.
+    from research.notes import _tokenize
+    print("Rank6 BM25 _tokenize (math stripped, prose kept):")
+    toks = _tokenize(r"The softmax layer $\mathrm{softmax}(x)=\frac{e^{x}}{\sum_j e^{x_j}}$ aids attention.")
+    junk = {"frac", "sqrt", "mathrm", "sum", "mathbb", "cdot", "left", "right"}
+    check("no LaTeX-command junk tokens", not (set(toks) & junk), toks)
+    check("prose terms survive", {"softmax", "layer", "attention"} <= set(toks), toks)
+    toks2 = _tokenize(r"$$\nabla_\theta \mathcal{L} = \frac{1}{N}\sum_i g_i$$")
+    check("pure display-math span -> no junk", not (set(toks2) & junk), toks2)
+
+
 def test_mathfix_render_robustness():
     # The full-book render fixes: raw % in math, stray inline $, undefined-macro neutralize.
     print("Render robustness (raw %, stray $, macro-allowlist):")
@@ -129,6 +142,7 @@ if __name__ == "__main__":
     test_surrogate_guard()
     test_mathfix_render_safety()
     test_mathfix_render_robustness()
+    test_bm25_math_safe()
     print()
     if _fail:
         print(f"RESULT: {_fail} check(s) FAILED")

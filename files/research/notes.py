@@ -27,7 +27,15 @@ def dedup(sources: List[Source]) -> List[Source]:
 # Used as the sparse arm in RRF fusion alongside dense cosine.
 
 def _tokenize(text: str) -> List[str]:
-    return re.findall(r"[A-Za-z0-9]+", text.lower())
+    # Rank6: math is NOISE for the sparse arm. The old tokenizer turned `\frac{a}{b}` into
+    # ['frac','a','b'] and LaTeX control words (frac/sqrt/beta/sum/mathrm...) into high-frequency
+    # junk terms shared by EVERY formula-heavy section -> inflated BM25 similarity -> false
+    # near-duplicates and wrong RRF fusion. Strip $...$/$$...$$ spans + LaTeX commands BEFORE
+    # tokenizing; prose terms that matter ("softmax", "attention", "quantization") survive in prose.
+    text = text.lower()
+    text = re.sub(r"\$\$.+?\$\$|\$[^$\n]+?\$", " ", text, flags=re.DOTALL)
+    text = re.sub(r"\\[a-z]+", " ", text)
+    return re.findall(r"[a-z0-9]+", text)
 
 
 def _bm25_score(doc_tokens: List[str], query_tokens: List[str],
@@ -98,7 +106,7 @@ def _is_noisy_domain(url: str) -> bool:
 
 
 def prefilter(sources: List[Source], section_prompt: str,
-              min_relevance: float = 0.45,
+              min_relevance: float = 0.48,   # Rank7: 0.45->0.48 trims the weakest off-topic tail
               noisy_min_relevance: float = 0.65,
               embed_model: str = "bge-m3:latest",
               protected_ids: set = None) -> List[Source]:

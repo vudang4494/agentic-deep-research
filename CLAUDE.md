@@ -66,7 +66,7 @@ Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.p
 | Accept Section | grounding ≥ **0.70** AND topic ≥ **0.50** AND n_cites > 0 AND cross_refs đủ AND **cite_precision ≥ 0.45** (G2, fail-open) | `deep_investigate.py:681,694` |
 | StageE HARD BLOCK | grounding pass NHƯNG topic < 0.50 → block (grounding KHÔNG đủ một mình) | `deep_investigate.py:702` |
 | P0c penalty | `max(0.05, (1 − seen/max_seen)²)`; canonical **EXEMPT** | `notes.py:311` |
-| Prefilter cosine | 0.45 (grey-domain 0.65) | `notes.py:101` |
+| Prefilter cosine | **0.48** (grey-domain 0.65) — Rank7: was 0.45 | `notes.py:109` |
 | Min words / Cross-ref | 120 từ / 2·1·0 theo số prior sections | `deep_investigate.py` |
 
 ⚠️ Các số `0.80 grounding`, `0.80 topic_purity`, `jaccard 0.30/0.70` trong tài liệu cũ là **ASPIRATIONAL (target), KHÔNG được enforce**. Đừng trích chúng làm hành vi thật.
