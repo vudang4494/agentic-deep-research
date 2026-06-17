@@ -19,7 +19,6 @@ DuckDuckGo as research providers. Provider-agnostic — swap in any
 OpenAI-compatible endpoint.
 
 <p align="center">
-  <img src="pipeline.jpg" alt="Agentic Deep Research pipeline" width="640">
   <br>
   <em>End-to-end pipeline: planner → per-section research / write / verify loop → assemble & render.</em>
 </p>
