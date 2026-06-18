@@ -211,7 +211,10 @@ def grounding_score(claims: list, sources: list, threshold: float = HHEM_SUPPORT
     # earlier windowing (excerpt x windows x sources) made this 515s/section. Use ONE premise
     # per source (Rank-1 fetch already returns the math-dense window), few sources, capped
     # claims; the per-[N] citation-aware pass below carries precision cheaply (~1 pair/claim).
-    MAX_PREMISE_CHARS = 1500   # one HHEM premise (~370 tokens) per source
+    # HHEM = flan-t5-base, HARD 512-token window. Dense technical text tokenizes ~2 chars/token,
+    # so premise+claim must stay well under ~1000 chars or the (premise,claim) pair is silently
+    # TRUNCATED -> garbage scores (observed 940>512 -> grounding pinned ~0.08 on good content).
+    MAX_PREMISE_CHARS = 700    # ~350 tokens; leaves room for the claim + prompt template under 512
     MAX_SOURCES = 3
     MAX_CLAIMS = 24
     claims = claims[:MAX_CLAIMS]
@@ -234,7 +237,7 @@ def grounding_score(claims: list, sources: list, threshold: float = HHEM_SUPPORT
     # All (excerpt, claim) pairs in ONE batched predict; remember each pair's claim.
     pairs, pair_claim_idx = [], []
     for ci, claim in enumerate(claims):
-        c = claim[:500]
+        c = claim[:280]   # keep premise+claim under the 512-token HHEM window
         for exc in excerpts:
             pairs.append((exc, c))
             pair_claim_idx.append(ci)
@@ -299,8 +302,8 @@ def grounding_score(claims: list, sources: list, threshold: float = HHEM_SUPPORT
                 if e:
                     _excs.append(e[:MAX_PREMISE_CHARS])
         if _excs:
-            _cited_pairs.append(("\n".join(_excs)[: MAX_PREMISE_CHARS * 2],
-                                 _re2.sub(r"\[\d+\]", "", claim)[:500]))
+            _cited_pairs.append(("\n".join(_excs)[:MAX_PREMISE_CHARS],
+                                 _re2.sub(r"\[\d+\]", "", claim)[:280]))
             _cited_ci.append(ci)
     _cited_score = {}
     if _cited_pairs:
