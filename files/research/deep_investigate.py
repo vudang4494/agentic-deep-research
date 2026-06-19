@@ -236,6 +236,10 @@ def investigate_section(
     run_seen_counts: dict = None,
     # Rank6: primary_floor reserves N of top-8 slots for arxiv/wikipedia primary sources
     primary_floor: int = 0,
+    # AGENTIC evidence-pool memory: on-topic Source objects already gathered by sibling sections this
+    # run. A niche section whose fresh queries return little is RESCUED by reusing these (the cosine
+    # prefilter still drops off-topic ones) -> completeness up WITHOUT sacrificing faithfulness.
+    evidence_pool: list = None,
 ) -> SectionResult:
     # P0c: run-level seen-count map -- penalizes over-represented sources across sections
     """
@@ -362,6 +366,22 @@ def investigate_section(
                 print(f"  [R{round_n}] P0b: injected {len(protected_sources)} canonical papers")
                 raw_sources = protected_sources + raw_sources
 
+        # AGENTIC evidence-pool rescue (TARGETED): ONLY when fresh retrieval is THIN does the section
+        # reuse on-topic sources gathered by sibling sections this run. They still pass the cosine
+        # prefilter below (off-topic dropped -> faithful), and are P0c-EXEMPT in rank_rrf (else the
+        # reused source -- the whole point of the rescue -- gets down-ranked out of the top-k by the
+        # diversity penalty, since siblings already cited it). Lifts completeness for niche sub-topics
+        # WITHOUT weakening faithfulness; scoped to starved sections so well-covered ones are untouched.
+        _pool_rescue_ids = set()
+        if evidence_pool and len(raw_sources) < 10:
+            _seen = {(getattr(s, "id", "") or getattr(s, "url", "") or "") for s in raw_sources}
+            _reuse = [s for s in evidence_pool
+                      if (getattr(s, "id", "") or getattr(s, "url", "") or "") not in _seen][-80:]
+            if _reuse:
+                raw_sources = raw_sources + _reuse
+                _pool_rescue_ids = {(getattr(s, "id", "") or getattr(s, "url", "") or "") for s in _reuse}
+                print(f"  [R{round_n}] evidence-pool RESCUE: +{len(_reuse)} reused candidate(s) (fresh thin)", flush=True)
+
         if not raw_sources:
             print(f"  [R{round_n}] No sources gathered")
             if round_n < max_rounds:
@@ -406,6 +426,7 @@ def investigate_section(
             top_k=20, embed_model=embed_model,
             protected_ids=protected_source_ids,
             seen_counts=seen_counts,   # P0c: penalize over-represented sources
+            p0c_exempt_ids=_pool_rescue_ids,   # agentic: don't P0c-penalize pool-rescued siblings
             primary_floor=primary_floor,  # Rank6: reserve arxiv/wiki slots
         )
 
