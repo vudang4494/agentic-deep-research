@@ -11,6 +11,16 @@
 
 ## Session log (mới nhất trước)
 
+### [2026-06-21] Chuẩn hóa docs + sync GitHub/HF; làm rõ grounding = ADVISORY
+- **Bối cảnh:** verify toàn bộ docs/memory vs code (audit 13-agent read-only) để hết nhiễu sau chuỗi HHEM-fix/evidence-pool/benchmark; đồng bộ GitHub + HF.
+- **Làm rõ grounding (supersede mọi note "G3 de-saturated" / "grounding ≥0.70 = gate chất lượng" ở entry cũ bên dưới):** có HAI số — `grounding`=per-source-MAX (gate dùng; là soft conjunct của `base_ok` ở 0.70 NHƯNG không block một mình: thiếu → ship `quality='degraded'`) và `grounding_cited`=strict cited (~0.06 trên prose, BAER post-hoc, **ADVISORY**). Faithfulness thật = G2 cite_prec; tín hiệu phân biệt LIVE = **G4 topic** (G2 **saturate 1.0** trên 4-topic benchmark → non-discriminating ở đó).
+- **Embed:** xác nhận **UNIFIED** `bge-m3:latest` mọi path (`config.py:34`/`notes.py:111`/`query_router.py:210`/`verify.py:35`); 0 ref nomic sống — supersede note "Embed SPLIT" ở entry 06-15/06-16.
+- **Thay đổi:** chuẩn hóa RULES/CLAUDE/GLOSSARY/README (grounding advisory, embed unify, **G2 fail-CLOSED**, evidence-pool, line-refs) + HF card (G2 saturate, HHEM advisory) + refresh short-memory snapshot. **PR #9 merged → main**; HF `vudang449/agentic-deep-research-eval` synced.
+- **Bằng chứng:** `deep_investigate.py:227,729,745,850`, `faithfulness.py` grounding_score (per-source-max + `grounding_cited`), `notes.py:109/110/324`. Docs-only, 0 đổi hành vi pipeline.
+- **Còn lại:** semantic/LLM-judge eval (gap lớn nhất — BAER chỉ cơ học); deeper retriever topic ngách.
+
+---
+
 ### [2026-06-16] #3+#4+#5 SAFE (no info loss) + validate_v39
 - **#3 embed unify** → `bge-m3:latest` toàn bộ (config/query_router/deep_investigate; bỏ nomic dùng-thiếu-prefix). **#5 anchoring AN TOÀN:** anchor (must_cover_terms[0]) CHỈ vào rank_rrf + rerank (ordering/chọn top-8); **prefilter — chỗ hard-drop duy nhất — giữ section_prompt gốc** → KHÔNG bao giờ thu nhỏ pool. **#4 citation-aware grounding** (parse [N], premise = nguồn được cite, strip marker) = **warn-first** (log grounding_cited vs per-source; gate KHÔNG đổi) + **G2 fail-CLOSED** (lỗi verify_section → cite_prec=0.0, retry/best-effort, không hard-block, không mất content).
 - **Validation `validate_v39`** (safe version, exit 0): KHÔNG mất thông tin — prefilter kept 7-16, chỉ drop off-topic/grey, 0 empty-pool/HARD-BLOCK, 4 section ship (3219 từ > v37). #4: grounding(cited)=1.0=per-source trên section sạch (bật gate sẽ không mass-block). **G2 bắt đúng**: 2.1 cite_prec=0.0 trên section evidence borderline (rel=0.425) mà g/topic bỏ sót → vẫn ship best-effort. Đã dừng v38 (bản prefilter-anchored kém an toàn) trước khi sửa.
