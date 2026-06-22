@@ -43,7 +43,7 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`.
 
 **Verify layer — LIVE vs LEGACY (đừng sửa nhầm):**
-- **LIVE** (chạy trong `investigate_section`, `deep_investigate.py:~660-745`): `faithfulness.grounding_score` (HHEM, **G3 ADVISORY/log-only** — re-tie phân biệt cặp NLI sạch, nhưng strict-NLI chấm ~0.05–0.10 trên prose synthesized dù faithful → KHÔNG phải tín hiệu chất lượng; faithfulness thật = G2) + `verify.topic_relevance_check` (**G4**: blend heuristic + `answer_relevance` gemma LOCAL — **tín hiệu phân biệt LIVE**) + `verify.verify_section` (**G2** citation-integrity, cite_precision ≥0.45, **fail-CLOSED→0.0** khi lỗi, `:745`) + `verify.verify_cross_references_v2` (regex đếm).
+- **LIVE (gọi mỗi round) — NHƯNG chỉ P0a thật enforce, mọi verify post-writer là LOG-ONLY** (verified 4-topic, 390 sec): per-source-max grounding max **0.458 < 0.70** → `base_ok` LUÔN false → clean-accept + StageE + G2 đều không kích hoạt. `faithfulness.grounding_score` (HHEM, **G3 INERT** — log-only) + `verify.topic_relevance_check` (**G4** blend gemma LOCAL — **chạy nhưng KHÔNG enforce**, StageE không fire) + `verify.verify_section` (**G2** — **KHÔNG BAO GIỜ chạy**, kẹt sau `if base_ok`; `cite_precision=1.0`=default) + `verify.verify_cross_references_v2` (regex đếm). **Gate cứng SỐNG = P0a (pre-writer ~0.40) + StageD word-count.** Fix decouple G2 + re-baseline grounding → `plan.md` §Upgrade P0.
 - **LEGACY-only** (chỉ `deep_research.py`/scripts/eval gọi — ĐỪNG sửa như live): `verify_section_v2`, `crag_decision`, `strip_refine`, `scrub_unsupported_citations`. (`verify_section` + `answer_relevance` GIỜ dùng LIVE bởi G2/G4.)
 - Đổi accept/grounding → sửa `deep_investigate.py:606-740`, **KHÔNG** sửa `crag_decision`/`verify_section_v2` (no-op với run thật).
 - **Verifier ≠ Writer (bất biến — chống self-preference):** grounding = **HHEM**, topic/citation = **gemma** — model verify TÁCH khỏi writer (**Qwen**). ĐỪNG để Qwen tự chấm prose của chính nó (model tự duyệt văn mình → bias). Quyết định: 2026-06-16.
@@ -63,17 +63,19 @@ Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.p
 | Gate | Giá trị thật (code) | File |
 |------|---------------------|------|
 | P0a domain gate | `ev_threshold = min(0.40, max(0.30, min_topic_relevance−0.10)) ≈ 0.40` — HARD BLOCK round cuối | `deep_investigate.py:524` |
-| Accept Section (clean) | topic ≥ **0.50** (G4) AND n_cites > 0 AND cross_refs đủ AND **cite_precision ≥ 0.45** (G2, **fail-CLOSED→0.0** khi lỗi) AND grounding ≥ 0.70 (**advisory** — round cuối thiếu grounding → ship `quality='degraded'`, KHÔNG hard-block một mình) | `deep_investigate.py:729,745,850` |
-| StageE HARD BLOCK | grounding pass NHƯNG topic < 0.50 → block (block do **topic**, grounding KHÔNG đủ một mình) | `deep_investigate.py:751` |
-| P0c penalty | `max(0.05, (1 − seen/max_seen)²)`; canonical + pool-rescued **EXEMPT** | `notes.py:324` |
+| **Accept Section** | ⚠️ **Clean-accept INERT** — định nghĩa cần grounding≥0.70 (qua `base_ok`) mà per-source-max max **0.458** → base_ok LUÔN false → mọi section ship `quality='degraded'`; G2 `verify_section` (trong `if base_ok`) **không bao giờ chạy** → `cite_precision=1.0`=default | `deep_investigate.py:729,745,850` |
+| StageE HARD BLOCK | **KHÔNG BAO GIỜ fire** (cần grounding≥0.70) | `deep_investigate.py:751` |
+| P0c penalty | `max(0.05, (1 − seen/max_seen)²)`; canonical + pool-rescued **EXEMPT** ⚠️ bug aliasing → **no-op trong 1 run** (xem §Upgrade P0) | `notes.py:324` |
 | Prefilter cosine | **0.48** (grey-domain 0.65) — Rank7: was 0.45 | `notes.py:109` |
 | Min words / Cross-ref | 120 từ / 2·1·0 theo số prior sections | `deep_investigate.py` |
+
+> ⚠️ **THỰC TRẠNG (verified 4-topic, 390 sec):** gate cứng SỐNG duy nhất = **P0a (pre-writer ~0.40)** + word-count 120 + empty-pool. Mọi gate **post-writer (accept-clean, StageE, G2, grounding) đều INERT** vì `base_ok` cần grounding≥0.70 (max thực 0.458). `cite_precision=1.0` là **DEFAULT**, không đo. → fix `plan.md` §Upgrade P0.
 
 ⚠️ Các số `0.80 grounding`, `0.80 topic_purity`, `jaccard 0.30/0.70` trong tài liệu cũ là **ASPIRATIONAL (target), KHÔNG được enforce**. Đừng trích chúng làm hành vi thật.
 
 ## 6. 8 Guardrails — tránh đi sai hướng product/process
 1. **Output goal > volume.** Đây là technical book đúng-topic, grounded, auditable — KHÔNG phải máy sinh chữ. Run 700 trang mà drift/lặp = **FAIL**. Đừng tối ưu section/word/completion trước topic purity & non-redundancy.
-2. **Grounding KHÔNG phải chất lượng.** Trên run **v36**: `g=1.0` toàn bộ 280 section (gộp mega-premise) — nay HHEM dùng per-source-max (`faithfulness.py`) NHƯNG grounding vẫn **ADVISORY/log-only**: strict-NLI ~0.05–0.10 trên prose faithful, ngược lại saturate → tín hiệu phân biệt LIVE = **G4 topic**, KHÔNG phải grounding. `topic_relevance` cũng KHÔNG còn pure heuristic — **G4 blend** term-heuristic + `answer_relevance` gemma LOCAL (`verify.py:401-411`); quantized {0.5,0.75,1.0} chỉ là chữ ký pre-G4 (v36). Vẫn: đừng green-light run chỉ vì grounding.
+2. **Grounding KHÔNG phải chất lượng — và hiện CẢ verify post-writer đều INERT.** HHEM dùng per-source-max (`faithfulness.py`) NHƯNG max thực **0.458 < 0.70** → `base_ok` luôn false → **G2 lẫn StageE đều không chạy**; `cite_precision=1.0` là default. Tín hiệu **duy nhất còn discriminate = G4 topic** (`verify.py:401-411`, blend gemma LOCAL) — nhưng cũng chỉ **LOG, không enforce**. **Gate cứng THẬT = P0a pre-writer.** Đừng green-light run vì bất kỳ số verify post-writer nào; chúng chưa bảo vệ run (fix → §Upgrade P0).
 3. **Outline EMERGE từ evidence — GIẾT matrix pattern.** Không pre-template chapters×concepts. Nếu `outline_audit` trả `ok=false` (matrix/coherence/overlap) → **sửa OUTLINE trước Stage 2**, không vá ở writer.
 4. **Fix ở GATE, không ở writer.** Drift / off-topic evidence / canonical thiếu / nguồn dominate phải chặn ở P0a/P0b/P0c/prefilter (`notes.py`, `deep_investigate.py`). Không cho writer "cứ viết rồi tính".
 5. **Canonical papers được PROTECT, không penalize.** `protected_source_ids` bypass cosine prefilter + EXEMPT khỏi P0c. Mọi thay đổi retrieval/dedup phải giữ exemption này (nếu mất → canonical recall sụp về 0).
@@ -97,4 +99,4 @@ pkill -f files/deep_research_v3.py       # dừng
 ```
 
 ## 8. Trạng thái hiện tại
-Xem `files/memory/short-memory.md`. **Base** = orchestrator `deep_research_v3.py` + research layer, gồm: verify G2 (citation integrity) + G4 (topic — **tín hiệu phân biệt LIVE**) + G3 (grounding HHEM, **ADVISORY**), LOCAL-only, **Verifier≠Writer**, outline anti-matrix (#1), embed `bge-m3` thống nhất (#3), anchoring an-toàn KHÔNG-mất-nguồn (#5), evidence-pool rescue (completeness), dedup G6. Đã validated + push. `llm_book_v36` là book CŨ (sinh bởi code trước cải tiến) — chỉ tham khảo lịch sử, KHÔNG phải trạng thái base.
+Xem `files/memory/short-memory.md`. **Base** = orchestrator `deep_research_v3.py` + research layer, gồm: LOCAL-only, **Verifier≠Writer** (model tách thật), outline anti-matrix (#1), embed `bge-m3` thống nhất (#3), anchoring an-toàn KHÔNG-mất-nguồn (#5), evidence-pool rescue (completeness), render tectonic robust. **⚠️ Đánh giá 2026-06-22 (verified) phát hiện: verify post-writer (G2/G3/G4 + StageE) đều INERT — `base_ok` cần grounding≥0.70 mà max thực 0.458 → G2 không bao giờ chạy, cite_precision=1.0 là default; gate cứng SỐNG duy nhất = P0a pre-writer.** Roadmap fix → `plan.md` §Upgrade. `llm_book_v36` là book CŨ — chỉ tham khảo lịch sử.

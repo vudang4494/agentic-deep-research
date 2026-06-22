@@ -11,9 +11,18 @@
 
 ## Session log (mới nhất trước)
 
+### [2026-06-22] Đánh giá grounded (22-agent) → phát hiện verify post-writer INERT
+- **Bối cảnh:** đánh giá product có grounding thật (đọc code + benchmark + nội dung sách); mọi verification holds:true.
+- **Phát hiện then chốt (verified, tự re-check bằng số):** per-source-max grounding **không bao giờ chạm 0.70** (max 0.458; quality field: 0 "ok", mọi section "degraded" cả 4 run). Vì `base_ok` cần grounding≥0.70 → **base_ok LUÔN false** → (a) clean-accept không fire; (b) `verify_section` (G2) trong `if base_ok` **KHÔNG BAO GIỜ chạy** → `cite_precision=1.0` là DEFAULT init (BAER parse 93 dòng `cite_prec=1.000` từ retry-hint, gắn nhãn nhầm "G2 REAL"); (c) StageE topic-block (cần g≥0.70) **không fire**. → **Gate cứng SỐNG duy nhất = P0a domain-evidence (~0.40 pre-writer)**; mọi verify post-writer chỉ LOG. **SUPERSEDE "faithfulness thật = G2 cite_precision" ở entry 06-21** — G2 không chạy.
+- **Điểm (harsh, evidence-based):** tổng **C+/B−**. Faithfulness C− · Eval C+ (vòng tròn: topic≡accept, 0 ground-truth) · Architecture B− (render/resume tốt; bug P0c aliasing no-op) · sách-RLHF B− (toán DPO đúng nhưng eqn malformed + LaTeX leak) · sách-605pg C+ (matrix 269/269 forced scale) · novelty B−.
+- **Thay đổi:** clean toàn bộ docs (RULES/CLAUDE/GLOSSARY/README + memory + HF card) về đúng "verify post-writer INERT, P0a là gate sống" + viết §Upgrade roadmap vào `plan.md`.
+- **Bằng chứng:** grounding max 0.458, `bench_rlhf.log` 93×`cite_prec=1.000`, `benchmark_book.py:248`, `deep_investigate.py:729` base_ok, `:301` `run_seen_counts = x or {}` aliasing.
+
+---
+
 ### [2026-06-21] Chuẩn hóa docs + sync GitHub/HF; làm rõ grounding = ADVISORY
 - **Bối cảnh:** verify toàn bộ docs/memory vs code (audit 13-agent read-only) để hết nhiễu sau chuỗi HHEM-fix/evidence-pool/benchmark; đồng bộ GitHub + HF.
-- **Làm rõ grounding (supersede mọi note "G3 de-saturated" / "grounding ≥0.70 = gate chất lượng" ở entry cũ bên dưới):** có HAI số — `grounding`=per-source-MAX (gate dùng; là soft conjunct của `base_ok` ở 0.70 NHƯNG không block một mình: thiếu → ship `quality='degraded'`) và `grounding_cited`=strict cited (~0.06 trên prose, BAER post-hoc, **ADVISORY**). Faithfulness thật = G2 cite_prec; tín hiệu phân biệt LIVE = **G4 topic** (G2 **saturate 1.0** trên 4-topic benchmark → non-discriminating ở đó).
+- **Làm rõ grounding (supersede mọi note "G3 de-saturated" / "grounding ≥0.70 = gate chất lượng" ở entry cũ bên dưới):** có HAI số — `grounding`=per-source-MAX (gate dùng; là soft conjunct của `base_ok` ở 0.70 NHƯNG không block một mình: thiếu → ship `quality='degraded'`) và `grounding_cited`=strict cited (~0.06 trên prose, BAER post-hoc, **ADVISORY**). ~~Faithfulness thật = G2 cite_prec; tín hiệu phân biệt LIVE = G4 topic (G2 saturate 1.0)~~ **(⚠️ SAI — supersede 06-22: G2 KHÔNG BAO GIỜ chạy, cite_precision=1.0 là default; gate sống = P0a).**
 - **Embed:** xác nhận **UNIFIED** `bge-m3:latest` mọi path (`config.py:34`/`notes.py:111`/`query_router.py:210`/`verify.py:35`); 0 ref nomic sống — supersede note "Embed SPLIT" ở entry 06-15/06-16.
 - **Thay đổi:** chuẩn hóa RULES/CLAUDE/GLOSSARY/README (grounding advisory, embed unify, **G2 fail-CLOSED**, evidence-pool, line-refs) + HF card (G2 saturate, HHEM advisory) + refresh short-memory snapshot. **PR #9 merged → main**; HF `vudang449/agentic-deep-research-eval` synced.
 - **Bằng chứng:** `deep_investigate.py:227,729,745,850`, `faithfulness.py` grounding_score (per-source-max + `grounding_cited`), `notes.py:109/110/324`. Docs-only, 0 đổi hành vi pipeline.
