@@ -2,7 +2,76 @@
 
 **Purpose:** Evaluate and evolve a truly prompt-emergent Deep Research pipeline where structure, chapters, subchapters, and section content arise from raw prompt + discovered evidence, not from pre-scripted topic templates.
 
-**Status:** P3a/b/c SHIPPED + VERIFIED (6/6 topics fresh eval). Experiment A COMPLETE. P1, P2, P4 pending. Ready for B/C/D after P1.
+**Status:** P3a/b/c SHIPPED. **Ưu tiên hiện tại = §Upgrade Roadmap (2026-06-22, ngay dưới)** — đánh giá grounded phát hiện verify post-writer INERT (faithfulness rỗng); P0 = decouple G2 + re-baseline grounding + fix P0c aliasing.
+
+---
+
+# §Upgrade Roadmap (2026-06-22, eval-driven) — ƯU TIÊN CAO NHẤT
+
+> Nguồn: đánh giá grounded 22-agent (đọc code + benchmark + nội dung sách thật), mọi finding adversarial-verify `holds:true`. Điểm tổng product hiện tại **C+/B−**. Roadmap này sửa đúng các điểm yếu đã verify. **Bất biến giữ nguyên:** LOCAL-only · Verifier≠Writer · fix-ở-GATE-không-ở-writer · outline emerge-from-evidence.
+
+**Phát hiện nền (lý do có roadmap này):** mọi verify **post-writer** (G2 citation / G3 grounding / G4 topic / StageE) hiện **INERT**. `base_ok` yêu cầu per-source-max grounding ≥ 0.70, nhưng HHEM strict-NLI trên prose synthesized chỉ ~0.05–0.10 (max thực **0.458**) → `base_ok` LUÔN false → clean-accept không fire, mọi section ship `quality='degraded'`, `verify_section` (G2) **không bao giờ chạy** → `cite_precision=1.0` là **default** (BAER parse nhầm từ log). **Gate cứng SỐNG duy nhất = P0a domain-evidence (~0.40, pre-writer).**
+
+Mỗi item: **Vấn đề (bằng chứng)** → **Fix (file:dòng)** → **Acceptance (đo bằng gì)**.
+
+## P0 — Faithfulness sống lại (verify post-writer đang chết)
+
+### P0-1. Decouple G2 khỏi thanh grounding chết
+- **Vấn đề:** `verify_section` (G2 citation-vs-source) nằm trong `if base_ok:` (`deep_investigate.py:737`); `base_ok` cần grounding≥0.70 (`:729`) không bao giờ pass → G2 **không bao giờ chạy**, `cite_precision=1.0` là default (`:732`).
+- **Fix:** tách `gate_ok = (n_cites>0 AND topic≥min_topic AND has_min_cross_refs)` (bỏ grounding khỏi điều kiện cứng); chạy `verify_section` khi `gate_ok` (bất kể grounding); accept khi `gate_ok AND cite_precision≥min_cite_precision`. Giữ grounding log advisory.
+- **Acceptance:** re-run benchmark → `cite_precision_mean < 1.0` CÓ phân bố (không phải toàn 1.0); một số section fail G2 → retry/block; log có dòng "Citation integrity (G2)" thật.
+
+### P0-2. Re-baseline / bỏ grounding khỏi `base_ok`
+- **Vấn đề:** per-source-max grounding max 0.458 < min_grounding 0.70 → 0/390 section "ok", 100% "degraded"; StageE (`:751`) cần g≥0.70 nên không bao giờ fire (topic-drift không bị chặn).
+- **Fix:** bỏ `grounding >= min_grounding` khỏi `base_ok`; chuyển grounding sang log thuần (cả `grounding` per-source-max lẫn `grounding_cited`). StageE đổi điều kiện chặn topic-drift độc lập grounding (topic<min_topic + n_cites>0 → block/retry).
+- **Acceptance:** quality field có lại "ok"; StageE fire trên topic-fail thật; không section nào ship "degraded" chỉ vì grounding.
+
+### P0-3. Fix bug aliasing P0c (seen-penalty no-op trong 1 run)
+- **Vấn đề:** `deep_investigate.py:301` `run_seen_counts = run_seen_counts or {}` — dict rỗng `{}` là falsy → rebind sang local mới; propagate-back (`:832`) ghi vào bản copy bị vứt. Hệ quả: P0c seen-penalty (`notes.py:322`) **không bao giờ fire cross-section** trong 1 run (state.json `run_seen_counts` len=0 dù 454 source). Một paper có thể dominate >50% mà không bị phạt.
+- **Fix:** `if run_seen_counts is None: run_seen_counts = {}` (giữ object identity của caller).
+- **Acceptance:** sau fresh run, `run_seen_counts` non-empty; grep log thấy P0c penalty fire; không source nào >50% sections.
+
+## P1 — Cấu trúc sách & độ tin eval
+
+### P1-1. Matrix thành HARD gate (chống template ở scale)
+- **Vấn đề:** forced 24×12 → 269/269 heading rơi vào ~15 archetype skeleton (đúng matrix Guardrail 3 cấm). Detector hiện chỉ match prefix-bucket (`outline_from_research.py:430`) → mù với suffix-template; `MATRIX_PATTERN_BLOCK` chỉ fire khi >50 pattern → audit `ok:false` mà vẫn ship 605pg.
+- **Fix:** thay detector prefix bằng suffix/skeleton (Counter trên title-suffix + skeleton, như `benchmark_book.py:145`); hạ ngưỡng block xuống tỷ lệ (vd >40% section chia sẻ ≤15 skeleton) → reject outline TRƯỚC Stage 2.
+- **Acceptance:** outline templated → `ok:false` → **bị reject** (không ship); `matrix_suffix=[]` trên outline được accept.
+
+### P1-2. Paragraph/sentence dedup lúc assemble
+- **Vấn đề:** boilerplate câu lặp xuyên chương; Jaccard section-level (`near_dup_pairs=0`) không thấy. (Cũng có cite "Section X.Y" bịa.)
+- **Fix:** thêm pass dedup câu/embedding (bge-m3 cosine giữa câu mở/đóng các section) lúc assemble (`deep_research_v3.py`); resolve/loại "Section N.M" numeric refs về title thật.
+- **Acceptance:** đếm boilerplate trùng giảm; 0 numeric-ref bịa trong book.
+
+### P1-3. Math validation gate (chống eqn hỏng + LaTeX leak)
+- **Vấn đề:** ship vào PDF: mẫu số Bradley-Terry thiếu ngoặc (`bench_rlhf/book.md:487,3706`), DPO loss leak ra literal `\$\$`+escaped braces trong backtick (`:510-512,529-531`). mathfix hiện cho qua.
+- **Fix:** thêm vào `mathfix.py` check: balance paren/brace trong display-math + reject `$`/`$$` lồng trong backtick/escaped → neutralize hoặc flag retry.
+- **Acceptance:** defect đã biết không còn ship; test doc với các defect này pass qua trạng thái neutralized.
+
+### P1-4. Near-miss rescue (0.35–0.40) thay vì drop cứng
+- **Vấn đề:** 71% block ở dải near-miss 0.30–0.40 ("đúng domain, thiếu framing hẹp", trung bình chỉ thiếu 0.08); ~17.5 section/sách bị mất coverage recoverable.
+- **Fix:** với evidence-rel ∈ [0.35,0.40), trigger **re-query nhắm trúng** term-framing còn thiếu (từ reason "lacks specific X" của gate) trước khi hard-drop; nếu vẫn thiếu → ship "degraded/advisory" thay vì drop.
+- **Acceptance:** một phần near-miss block được rescue; block-rate giảm mà faithfulness (cite_precision đo thật sau P0-1) không tụt.
+
+### P1-5. Held-out judge độc lập (phá vòng tròn eval)
+- **Vấn đề:** BAER "semantic signals" (topic, ref-on-topic) là re-read phán quyết của chính pipeline (`topic_pass ≡ accept_rate` mọi run); 0 ground-truth ngoài; 0 đo correctness/coherence.
+- **Fix:** script eval dùng **model KHÁC HỌ** (hoặc ~20 section gold-set người gán nhãn) chấm correctness/coherence trên sample, KHÔNG đọc lại state.json.
+- **Acceptance:** có 1 số chất lượng độc lập, decorrelated với accept_rate; report kèm số này.
+
+## P2 — Logic agentic sâu hơn (xây năng lực, không chỉ chứng minh)
+
+### P2-1. Citation-graph 2nd-hop retrieval cho topic ngách
+- **Vấn đề:** pool thưa cho sub-topic ngách → near-miss block; retrieval hiện chỉ 1-hop (search provider).
+- **Fix:** với section pool mỏng, follow references của top paper (arxiv refs/semantic-scholar) để fetch nguồn 2nd-hop on-topic → nạp qua cùng prefilter (faithful) + P0c-exempt như evidence-pool.
+- **Acceptance:** pool-depth tăng cho topic ngách; near-miss block giảm; rescue-fire count đo được.
+
+### P2-2. Primary-source routing cho citation định nghĩa/phương trình
+- **Vấn đề:** marker `[N]` ở định nghĩa/equation đôi khi trỏ secondary aggregator (emergentmind/DDG-redirect) thay vì paper gốc (vd τ/Ω(τ) trỏ explainer thay vì Yao 2022; Voyager trỏ survey).
+- **Fix:** rule ưu tiên primary-source khi cite block định nghĩa/equation (match về canonical arxiv ID nếu có trong pool).
+- **Acceptance:** citation ở dòng định nghĩa/equation trỏ primary arxiv ID (đo % primary-cite trên equation lines).
+
+## Thứ tự đề xuất
+**P0 trước (1 sprint)** — biến faithfulness từ ảo thành thật + sửa P0c; đây là đòn bẩy lớn nhất (chạm cả Faithfulness C− lẫn Eval C+). Sau đó **P1-5 + P1-1** (eval độc lập + chống matrix để re-baseline trung thực), rồi P1 còn lại, cuối cùng **P2** (năng lực agentic). Mỗi P0/P1 item phải có validation run đo Acceptance trước khi tin.
 
 ---
 

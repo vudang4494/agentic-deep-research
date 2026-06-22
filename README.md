@@ -60,11 +60,11 @@ Topic ─▶ Discovery ─▶ Outline (from evidence) ─▶ Deep Investigation 
 | 3 | **Assemble** | — | `book.md` + math hygiene (single-source [`research/mathfix.py`](files/research/mathfix.py)) + per-section references |
 | 4 | **Render** (`--render`) | — | pandoc → **tectonic** (LaTeX, `-Z continue-on-errors`); WeasyPrint fallback |
 
-### The gates (where quality is actually enforced)
-- **P0a** domain gate — hard-blocks a section whose evidence is off-domain (≈0.40), instead of letting the writer drift.
-- **P0b** canonical inject / **P0c** seen-penalty — foundational papers are protected (exempt from prefilter + dedup); over-represented sources are penalized.
+### The gates — what *actually* enforces (honest, verified on the 4-topic benchmark)
+- **P0a** domain gate — the **only live hard gate**: hard-blocks a section whose *evidence* is off-domain (≈0.40, **pre-writer**), instead of letting the writer drift. ~27% of sections block here.
+- **P0b** canonical inject / **P0c** seen-penalty — foundational papers are protected (exempt from prefilter + dedup); over-represented sources are penalized. *(P0c cross-section penalty currently no-ops within a single run — a known bug, see the upgrade plan.)*
 - **Prefilter** — drop sources below cosine **0.48** to the section (grey domains 0.65); canonical exempt.
-- **Clean-accept a section when:** topic ≥ **0.50** (G4, gemma) **AND** cite-precision ≥ **0.45** (G2, gemma) **AND** n_cites > 0 **AND** cross-refs satisfied — plus grounding ≥ **0.70** (G3, HHEM) as an **advisory** conjunct that never blocks on its own (a section short only on grounding ships flagged `degraded`, not dropped). The real hard-blocks are off-domain evidence (**P0a**), topic-drift (**StageE**), and sub-120-word sections — so drift is blocked, not shipped.
+- **Post-writer verify (grounding G3 / topic G4 / cite-precision G2) is currently LOG-ONLY, not enforced.** The intended clean-accept gate is wrapped behind `grounding ≥ 0.70`, but HHEM strict-NLI scores ~0.05–0.10 on synthesized prose (max observed 0.458), so that bar never clears — the citation check (G2) never runs and the reported `cite_precision = 1.0` is an un-measured default. Every section ships flagged `degraded`. **Making these post-writer gates real (decouple G2, re-baseline grounding) is the #1 item on the upgrade plan.** This is the product's most important known limitation, stated plainly rather than hidden.
 
 > Thresholds live in **code** (`deep_investigate.py`, `notes.py`, `config.py`), not docs — see [RULES.md](RULES.md) for the full table.
 
