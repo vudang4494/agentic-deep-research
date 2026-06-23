@@ -22,15 +22,19 @@ from .config import JUDGE_MODEL
 
 OLLAMA_BASE = "http://localhost:11434"
 DEFAULT_JUDGE_MODEL = JUDGE_MODEL
-DEFAULT_TIMEOUT = 60.0
+DEFAULT_TIMEOUT = 150.0  # was 60s: a 12-34 citation batch needs more than 60s; a timeout used to
+                          # fail-CLOSED the WHOLE section to no_evidence=0.3 (false floor) -- see chunked judge.
 MAX_CLAIM_CHARS = 600
 MAX_EVIDENCE_CHARS = 1200
 
 # Cosine thresholds for auto-resolution (conservative — reduces false-positive risk).
 # cos ≥ AUTO_SUPPORT_COS  → verdict = "supports"     (no LLM call)
 # cos ≤ AUTO_UNRELATED_COS → verdict = "unrelated"  (no LLM call)
-# 0.30 < cos < 0.75       → QUEUE for LLM judge
-AUTO_SUPPORT_COS = 0.75
+# AUTO_UNRELATED_COS < cos < AUTO_SUPPORT_COS → QUEUE for LLM judge
+# AUTO_SUPPORT_COS raised 0.75 → 0.90: cos 0.75-0.90 are PARAPHRASES that must be JUDGED, not
+# auto-credited 1.0 -- the old 0.75 shortcut produced false auto-supports (claim vs merely-topical
+# evidence at cos~0.77) that INFLATED cite_precision with zero LLM check. Only near-verbatim auto-passes now.
+AUTO_SUPPORT_COS = 0.90
 AUTO_UNRELATED_COS = 0.30
 EMBED_MODEL = "bge-m3:latest"
 
@@ -95,12 +99,15 @@ def _strip_think(s: str) -> str:
 
 
 def _extract_claim(text: str, marker_pos: int, window_chars: int = 400) -> str:
-    """Pull the sentence(s) leading up to a `[N]` marker, up to ~window_chars."""
+    """Pull the single sentence a `[N]` marker anchors (the text after the LAST sentence
+    boundary before the marker). Was the FIRST boundary -> kept several sentences -> the judge
+    saw a bloated, mis-attributed claim and under-scored a citation that actually supported its
+    own one sentence."""
     start = max(0, marker_pos - window_chars)
     chunk = text[start:marker_pos]
-    m = re.search(r"[.!?]\s+(?=[A-Z(\"'])", chunk)
-    if m:
-        chunk = chunk[m.end():]
+    bounds = list(re.finditer(r"[.!?]\s+(?=[A-Z(\"'])", chunk))
+    if bounds:
+        chunk = chunk[bounds[-1].end():]
     nn = chunk.rfind("\n\n")
     if nn >= 0:
         chunk = chunk[nn + 2:]
@@ -196,14 +203,29 @@ def _judge_batch(
         return [{"verdict": "no_evidence", "reason": f"batch judge call failed: {e}", "_skipped": True}
                  for _ in queued]
 
-    m = _JSON_ARRAY_RE.search(raw)
-    if not m:
-        return [{"verdict": "no_evidence", "reason": "batch judge returned non-JSON array", "_skipped": True}
-                for _ in queued]
-    try:
-        data = json.loads(m.group(0))
-    except Exception:
-        return [{"verdict": "no_evidence", "reason": "batch judge JSON parse failed", "_skipped": True}
+    # gemma4:e4b does NOT return one JSON array -- it emits ONE single-element array per LINE
+    # ("[{...}]\n[{...}]\n..."). The old _JSON_ARRAY_RE.search() kept only the FIRST array (1 verdict)
+    # and fail-CLOSED padded ALL other queued citations to no_evidence=0.3 -> a measurement floor that
+    # falsely degraded faithful sections. Collect EVERY array's objects (in order); if none parse,
+    # fall back to scanning every bare {...} verdict object.
+    data: List = []
+    for am in _JSON_ARRAY_RE.finditer(raw):
+        try:
+            arr = json.loads(am.group(0))
+            if isinstance(arr, list):
+                data.extend(arr)
+        except Exception:
+            continue
+    if not data:
+        for om in re.finditer(r"\{[^{}]*\}", raw):
+            try:
+                obj = json.loads(om.group(0))
+                if isinstance(obj, dict) and "verdict" in obj:
+                    data.append(obj)
+            except Exception:
+                continue
+    if not data:
+        return [{"verdict": "no_evidence", "reason": "batch judge returned non-JSON", "_skipped": True}
                 for _ in queued]
 
     results = []
@@ -328,10 +350,22 @@ def verify_section(
 
     # Add LLM-judged verdicts
     if queued:
-        # num_predict scales with citation count: ~80 tokens/verdict + overhead
-        num_predict = max(300, min(400 * len(queued) + 150, 4000))
+        # Chunk into small batches: gemma reliably emits a verdict for ~6 citations but QUITS
+        # partway (done_reason=stop) on 20-34 in a single call, so one big batch left most
+        # citations unjudged -> fail-CLOSED padded to no_evidence=0.3 (a false cite_precision
+        # floor). Per-chunk calls -- with one retry on a wholly-skipped chunk -- get every
+        # citation a REAL verdict; genuinely-missing ones still fail-closed to no_evidence.
+        CHUNK = 6
+        results = []
         with httpx.Client(timeout=timeout) as client:
-            results = _judge_batch(client, model, queued, num_predict)
+            for i in range(0, len(queued), CHUNK):
+                chunk = queued[i:i + CHUNK]
+                # ~80 tokens/verdict + overhead, scaled to the chunk
+                num_predict = max(300, min(400 * len(chunk) + 150, 4000))
+                chunk_res = _judge_batch(client, model, chunk, num_predict)
+                if chunk_res and all(r.get("_skipped") for r in chunk_res):
+                    chunk_res = _judge_batch(client, model, chunk, num_predict)  # one retry
+                results.extend(chunk_res)
 
         for (cite_num, claim, source), result in zip(queued, results):
             verdicts.append({"n": cite_num, "claim": claim[:200], **result})

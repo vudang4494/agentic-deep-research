@@ -54,6 +54,15 @@ Mỗi item: **Vấn đề (bằng chứng)** → **Fix (file:dòng)** → **Acce
 - **Fix (`deep_research_v3.py:131-154`):** `if key not in sections: continue`; gom `sec_lines` per-chapter, bỏ chapter rỗng (`if not sec_lines: continue`).
 - **Acceptance:** re-assemble `p0_validate3` → **14 heading, 14 body, 0 hollow** ✅ (đã verify).
 
+## P0.6 — G2 measurement fix (chẩn đoán "vì sao clean-accept thấp", 2026-06-24) ✅ DONE
+
+> Chẩn đoán đa-agent (5 giả thuyết, reproduce G2 thật trên `p0_validate4`): clean-accept thấp (7%) **chủ yếu là BUG ĐO, không phải quality**. `_judge_batch`: gemma4:e4b emit **1 mảng `[{...}]` mỗi DÒNG** chứ không phải 1 mảng lớn; `_JSON_ARRAY_RE.search()` chỉ bắt mảng đầu → parse 1 verdict → **fail-closed pad** phần còn lại `no_evidence=0.3` → floor giả (sec 1.3: giữ 1/15 verdict, pad 31). Cộng thêm gemma quit ~15 verdict trong 1 call lớn (done_reason=stop) + timeout 60s → wholesale no_evidence.
+
+- **Fix (`verify.py`, gate-side, LOCAL-only):** (1) parser thu **TẤT CẢ** object (`_JSON_ARRAY_RE.finditer` đa-mảng + fallback `re.finditer(r'\{...\}')` bare-object) `:199-220`; (2) **chunk queued ~6 + 1 retry/chunk** `:330-345`; (3) `DEFAULT_TIMEOUT 60→150` `:25`; (4) `_extract_claim` giữ câu **CUỐI** trước marker `:97-110`; (5) **`AUTO_SUPPORT_COS 0.75→0.90`** `:33` (paraphrase 0.75-0.90 phải qua judge — bỏ false auto-support inflate, +0.0 với GOOD nhưng −với BAD).
+- **Acceptance ✅:** Discrimination `bench_cite_discrimination.py` **GOOD 0.72→1.00 vs BAD 0.18/0.20→0.06/0.00 (gap +0.94/+1.00)** — bất đối xứng, BAD đi XUỐNG → KHÔNG rubber-stamp. Reproduce prose thật `p0_validate4`: faithful bị floor giả (1.1→0.500, 2.7→0.468) **ACCEPT thật**; weak (no_evidence-dominant) vẫn <0.45.
+- **DON'T (verified harmful):** hạ `min_cite_precision`, bump `no_evidence` 0.3, đụng `AUTO_UNRELATED_COS`, soften judge thêm, yếu fail-closed pad, để writer tự chấm.
+- **Residual #1 sau khi đo trung thực = retrieval/excerpt quality** (verdict no_evidence-dominant: excerpt là LaTeX-dump giữa-paper / page-chrome / snippet mỏng không chứa fact của `[N]`) → **bước kế: claim-aware excerpt selection** (`fetch.py`/`notes.py` — chọn passage gần claim nhất, không slice giữa-paper). Medium. Guard: claim-excerpt cosine tăng + discrimination giữ.
+
 ## P1 — Cấu trúc sách & độ tin eval
 
 > ✅ **RE-AUDIT GROUNDED 2026-06-23 (5-agent, verify trực tiếp code + run thật).** Cả 5 item **CÒN THẬT** (không cái nào bị fix đã-ship hóa giải). Thứ tự thực thi đã xác nhận: **P1-3 → P1-1 → P1-4 → P1-2 → P1-5** (leverage = impact × readiness ÷ invariant-risk). Mỗi item dưới kèm STILL-REAL + bằng chứng + fix-site + impact/readiness.
