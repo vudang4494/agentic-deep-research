@@ -14,6 +14,8 @@
 ## 2. Doctrine (CỐ ĐỊNH — không đổi)
 **Hệ thống KHÔNG được biết trước kịch bản.** Outline phải **emerge từ evidence**, tuyệt đối không pre-template `chapters × concepts` (đó chính là lỗi *matrix pattern* gây trùng lặp — xem Guardrail 3).
 
+**Cải thiện ở tầng ORCHESTRATION/INFERENCE (BẤT BIẾN).** Mọi nâng cấp chất lượng đến từ **retrieval · verify · revise-loop · prompting · evidence-selection** — **KHÔNG fine-tune model, KHÔNG build dataset** (giữ topic-agnostic · prompt-robust · auditable). Bottleneck writer-grounding → fix bằng **verify-revise loop** (feed G2 per-`[N]` verdict ngược writer để sửa đúng citation hỏng) + claim-aware excerpt, KHÔNG bằng weight.
+
 ```
 Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
    → Deep Investigation mỗi Section: QGN → Search → Rerank → Gate(P0a) → Write → Verify
@@ -82,6 +84,7 @@ Module phụ trợ (load-bearing): `config.py` (hằng số), `canonical_seeds.p
 6. **Enforce reference relevance theo SECTION.** Canonical recall cao che giấu sourcing kém per-section (~45% ref off-topic ở v36). Siết prefilter/domain gate; không accept section chỉ vì có ≥6 citation.
 7. **Ngưỡng sống trong CODE, doc là advisory.** Đừng quote số trong doc làm fact — đọc `config.py` / `deep_investigate.py` / `notes.py` / `verify.py`. *Lưu ý:* `product_quality_verifiers.py` là eval-time-only, KHÔNG chạy trong pipeline; đừng coi GATE-0..6 trong đó là đang bảo vệ run.
 8. **Một nguồn sự thật pipeline.** Orchestrator = `deep_research_v3.py`; mọi stage logic = `files/research/*.py`. `files/deep_research.py` là legacy v2 — đừng sửa nó như đang live. Memory gọn (short ≤50 dòng, long <200).
+9. **Cải thiện ở AGENTIC LOOP, KHÔNG train model.** Lever chất lượng = retrieval/verify/revise-loop/prompt/evidence-selection — KHÔNG fine-tune model & KHÔNG build dataset (giữ topic-agnostic, prompt-robust, auditable). Bottleneck (writer grounding) → verify-revise loop (feed G2 per-`[N]` verdict ngược writer), không phải weight. (Xem §2.)
 
 ## 7. Lệnh thường dùng
 ```bash

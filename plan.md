@@ -69,6 +69,13 @@ Mỗi item: **Vấn đề (bằng chứng)** → **Fix (file:dòng)** → **Acce
 - **Acceptance:** unit test `_best_passage` PASS (chọn đúng window chứa fact, head-slice trượt); excerpt-query cosine tăng by-construction (argmax). End-to-end cite_prec lift → đo ở fresh run. Guard: discrimination KHÔNG đổi (#3 không đụng judge).
 - **Lưu ý:** excerpt tốt hơn giúp CẢ writer (ground chặt hơn) LẪN judge (thấy passage đúng) → double win. arxiv down → benefit chủ yếu trên wiki/ddg (re-fetchable).
 
+## P1.5 — Verify-revise loop: fix writer-grounding AGENTIC (KHÔNG train) — **[NEXT, lever đúng-bản-chất]**
+
+> Lever đúng-bản-chất-agentic (xem doctrine `CLAUDE.md §2`/`§6.9`). Residual cuối = **writer grounding** (smoke arxiv+tavily = 40% accept / 0-6% block, NHƯNG ~60% vẫn `degraded`, cite_prec 0.25–0.44 dù retrieval+excerpt đã tốt). Fix ở LOOP, không weight.
+- **Vấn đề:** pipeline đã có 3-round retry + G2 chấm **per-`[N]`** (`verify.verify_section` trả `verdicts:[{n,verdict,reason}]`), nhưng degraded section đi hết 3 round vẫn floor → **feedback chưa dùng sắc**: retry-hint hiện gom chung (`weak_summary`), không chỉ writer ĐÚNG citation nào hỏng + vì sao.
+- **Fix (`deep_investigate.py` retry-hint, gate-side):** lấy `cite_res["verdicts"]` (đã có sẵn) → dựng hint **per-citation**: *"[5] no_evidence — excerpt không nêu X → đổi nguồn HOẶC bỏ claim; [8] unrelated — citation sai → thay"*. Round sau writer revise ĐÚNG chỗ trượt (surgical), không viết lại mù.
+- **Acceptance:** % degraded → ok tăng (near-miss 0.40-0.44 vượt 0.45 sau revise có-hướng); discrimination giữ (không nới gate).
+
 ## P1 — Cấu trúc sách & độ tin eval
 
 > ✅ **RE-AUDIT GROUNDED 2026-06-23 (5-agent, verify trực tiếp code + run thật).** Cả 5 item **CÒN THẬT** (không cái nào bị fix đã-ship hóa giải). Thứ tự thực thi đã xác nhận: **P1-3 → P1-1 → P1-4 → P1-2 → P1-5** (leverage = impact × readiness ÷ invariant-risk). Mỗi item dưới kèm STILL-REAL + bằng chứng + fix-site + impact/readiness.
@@ -96,7 +103,7 @@ Mỗi item: **Vấn đề (bằng chứng)** → **Fix (file:dòng)** → **Acce
 ### P1-5. Held-out judge độc lập (phá vòng tròn eval) — **[RANK 5] impact HIGH · readiness MED · BLOCKED (cần model)**
 - **STILL-REAL (tautological):** BAER topic (`benchmark_book.py:108` đọc `topic_relevance` pipeline ghi từ G4) + ref-on-topic (`:176-179` đọc `src.relevance` = `notes.rank()` cosine, **CÙNG scorer** với prefilter/P0a). `topic_pass ≡ accept_rate` về cấu trúc (cùng ngưỡng 0.50). **0 judge độc lập** trong `eval/` (`benchmark_book.py:7` "does NOT call any model"). `paper_eval.py` dùng gemma+qwen (cùng họ) và KHÔNG wire vào BAER.
 - **Fix-site:** `benchmark_book.py:241` (pass judge độc lập trên sample accepted sections) + `aggregate_benchmark.py:25-36` SIGNALS.
-- **Acceptance:** 1 số chất lượng decorrelated với accept_rate (kappa/agreement vs G4). **BLOCKER:** phải chọn+pull 1 model LOCAL **khác họ** (KHÔNG gemma-G4, KHÔNG qwen-writer) trong Ollama trước khi code; cô lập thành pass optional để giữ determinism "no-model" của BAER. Eval-side only — không cải thiện sách trực tiếp.
+- **Acceptance:** 1 số chất lượng decorrelated với accept_rate (kappa/agreement vs G4). **BLOCKER:** phải **chọn+pull (SWAP, KHÔNG train)** 1 model LOCAL **khác họ** (KHÔNG gemma-G4, KHÔNG qwen-writer) trong Ollama trước khi code; cô lập thành pass optional để giữ determinism "no-model" của BAER. Eval-side only — held-out judge là **eval artifact** (đo), KHÔNG phải training data.
 
 ## P2 — Logic agentic sâu hơn (xây năng lực, không chỉ chứng minh)
 
