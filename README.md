@@ -15,6 +15,11 @@
 It is **not** a text generator. The goal is an on-topic, grounded, **auditable** book: drift, repetition,
 and ungrounded claims are blocked at gates, not patched in the writer.
 
+**It improves at the orchestration / inference layer — never by training.** Quality comes from
+retrieval, verification, the revise loop, prompting, and evidence selection — *not* from fine-tuning the
+models or building datasets. That keeps it **topic-agnostic**, prompt-robust, and **auditable** (the loop
+leaves a trace; weights don't).
+
 ---
 
 ## See it in action

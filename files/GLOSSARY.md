@@ -23,6 +23,7 @@
 |------|-------------|
 | **Hard Block** | Khi kiểm tra fail, DỪNG và báo lỗi. Không viết section. Đối lập với Soft Block. |
 | **Soft Block** | Khi kiểm tra fail, vẫn tiếp tục nhưng đánh dấu chất lượng giảm. |
+| **Orchestration-layer improvement (doctrine)** | Cải thiện chất lượng ở tầng **orchestration/inference** (retrieval/verify/revise-loop/prompt/evidence-selection) — **KHÔNG fine-tune model, KHÔNG build dataset** (giữ topic-agnostic, prompt-robust, auditable). Bottleneck writer-grounding → verify-revise loop. Xem `CLAUDE.md §2`. |
 | **Domain Relevance Gate (P0a)** | Kiểm tra evidence pool đúng domain trước khi viết, qua `notes.check_evidence_domain()` = keyword-overlap + optional gemma judge (KHÔNG phải LLM-judge thuần). Threshold THẬT ≈ 0.40 (`deep_investigate.py:524`), KHÔNG phải 0.60. Accept-topic (writer) = 0.50. Ngưỡng chuẩn: RULES.md |
 | **Evidence Gate (P0a/B)** | Trước writer: (1) pool không rỗng (else HARD BLOCK); (2) domain-relevance ≥ ev_threshold≈0.40. KHÔNG có gate "đủ terms" riêng. |
 | **Grounding Score** | Điểm HHEM v2 NLI (0-1). **G3 = log-only/advisory** (P0 2026-06-22: đã bỏ khỏi gate): strict-NLI ~0.05–0.10 trên prose synthesized → KHÔNG phải metric, không hard-block. (g=1.0 v36 là HHEM degenerate cũ, đã fix.) |
@@ -85,6 +86,7 @@
 | **Experiment B** | Benchmark 7 topics sau khi có P0a/b/c fixes |
 | **Smoke Test** | Test nhanh 1 section để verify fixes hoạt động |
 | **Run** | Một lần chạy pipeline trên một topic |
+| **Eval artifact** (BAER / `product_quality_verifiers.py`) | Công cụ **ĐO** chất lượng run đã xong (`files/eval/*`) — eval-only, dùng để chấm, KHÔNG phải training data. |
 
 ## H. Acronyms thường gặp
 

@@ -16,6 +16,7 @@
 - **P0.7 (claim-aware excerpt, 2026-06-24) ✅:** residual #1 = excerpt là **head-slice 550 từ** (`enrich_top_sources`→`fetch_full_text`) không chứa fact → no_evidence. FIX `notes.py`: `_best_passage` fetch body ≥1600 từ → window chồng lấp 50% → trả **argmax cosine(section_prompt, window)** bge-m3; `enrich_top_sources(section_prompt=, embed_model=)` optional (legacy head-slice giữ). Call `deep_investigate.py:489`. Unit test PASS (chọn đúng fact-window). Giúp CẢ writer lẫn judge. End-to-end lift đo ở fresh run.
 - **P0.8 (.env auto-load, 2026-06-24) ✅:** `search.py` đọc `TAVILY_API_KEY`/`TAVILY_ENABLED`/`BRAVE_API_KEY` từ `os.environ`, nhưng orchestrator KHÔNG load `.env` → tavily **im lặng OFF** (effective providers = arxiv/wiki/ddg) dù `.env` có key + `TAVILY_ENABLED=1`. Mọi run trước phiên này thiếu tavily. FIX `deep_research_v3.py`: `_load_dotenv()` (parse `export KEY=val`, no-overwrite, no-dep) gọi trước `run_v3`. Tavily API verified HTTP 200, key hợp lệ. Tavily = **search provider, KHÔNG vi phạm LOCAL-only** (chỉ về model inference). → retrieval mạnh hơn (vá no_evidence/blocked).
 - **Verifier ≠ Writer** (bất biến): grounding=HHEM, topic/cite=gemma, writer=Qwen.
+- **DOCTRINE (bất biến):** cải thiện ở **orchestration/inference layer** (retrieval/verify/revise-loop/prompt/evidence-select) — KHÔNG train model, KHÔNG build dataset. Bottleneck writer-grounding → verify-revise loop. Chi tiết → `CLAUDE.md §2/§6.9`.
 
 ## Ngưỡng vận hành (chuẩn → RULES.md)
 - **P0a ≈0.40 (gate cứng SỐNG, pre-writer).** Min word 120 (HARD). Prefilter **0.48/0.65** (bge-m3). max_rounds CLI 3 / run_v3 nội bộ 2.
@@ -23,12 +24,13 @@
 
 ## Base này đã gồm (đã merge main + push)
 - #1 outline anti-matrix (chunked) · G6 bge-m3 dedup warn · **#3 embed unify bge-m3** · #5 anchoring SAFE (không mất nguồn) · #4 citation-aware grounding warn-first · **G2 fail-CLOSED→0.0**.
-- **HHEM re-tie** (hết degenerate 0.502; nay advisory) · **agentic evidence-pool rescue** (post-prefilter on-topic<5 → mượn sibling, P0c-exempt; block −21%, faithfulness giữ) · **mathfix single-source** + render tectonic robust · **4-topic benchmark** (accept 0.724±0.058; cite_prec/canonical/near-dup std=0) + **HF dataset** `vudang449/agentic-deep-research-eval`.
-- Unit test verify: `python3 files/eval/test_verify_optim.py`. Docs + HF card khớp code; **eval 2026-06-22 phát hiện verify post-writer INERT** (đã clean docs về đúng sự thật).
+- **HHEM re-tie** (hết degenerate 0.502; nay advisory) · **agentic evidence-pool rescue** (post-prefilter on-topic<5 → mượn sibling, P0c-exempt; block −21%, faithfulness giữ) · **mathfix single-source** + render tectonic robust · **4-topic benchmark** (accept 0.724±0.058; cite_prec/canonical/near-dup std=0).
+- Unit test verify: `python3 files/eval/test_verify_optim.py`. Docs khớp code; **eval 2026-06-22 phát hiện verify post-writer INERT** (đã clean docs về đúng sự thật).
 
 ## Open → ROADMAP UPGRADE (`plan.md` §Upgrade)
 - **P0 + P0-2b ✅ DONE (2026-06-23):** decouple G2 (chạy thật) · grounding log-only · P0c aliasing fixed (0→23) · **P0-2b: cite-judge soften → faithful prose ACCEPT (cite_prec 0.48, quality=ok), discrimination GOOD 0.72 vs BAD 0.18/0.20.** Faithfulness gate "xanh".
 - **→ P1 (re-audit grounded 2026-06-23, cả 5 CÒN THẬT) thứ tự = P1-3 → P1-1 → P1-4 → P1-2 → P1-5:** (3) math-gate `mathfix.py:222-234` — 2 bug reproduce: `\left`/`\right` substring đụng `\leftarrow` (false-pos) + thiếu paren-check → BT-denominator SAI ship (false-neg) [RANK1, risk 0]; (1) matrix HARD gate `outline_from_research.py:417-457` — suffix-matrix vẫn ship (`angles` fallback `:245-254`, p0_validate3 12ch×7suffix) [tripwire: retry qua LLM-path]; (4) near-miss rescue `deep_investigate.py:529-552` — 73% block ở 0.30-0.40, lệch 0.043, ~16 sec/sách mất [cần validation run, KHÔNG hạ ev_threshold]; (2) paragraph-dedup `deep_research_v3.py:155` — 1 câu lặp 17× xuyên 4ch [deletion-only polish]; (5) held-out judge `benchmark_book.py:241` — `topic_pass≡accept_rate` tautological [BLOCKED: cần model LOCAL khác-họ].
+- **→ P1.5 (NEXT, lever đúng-bản-chất — fix writer-grounding AGENTIC, KHÔNG train):** residual cuối = writer grounding (smoke arxiv+tavily = 40% accept / 0-6% block, NHƯNG 60% vẫn `degraded` cite_prec 0.25-0.44). Fix = **surgical verify-revise**: lấy `cite_res["verdicts"]` per-`[N]` (G2 đã trả sẵn) → retry-hint nói ĐÚNG citation nào hỏng + lý do → writer revise trúng chỗ (`deep_investigate.py` retry-hint). Topic-agnostic, fix ở LOOP. → `plan.md P1.5`.
 - **P2 (agentic sâu hơn):** citation-graph 2nd-hop cho topic ngách · primary-source routing cho citation định nghĩa/phương trình.
 
 ## Lệnh nhanh

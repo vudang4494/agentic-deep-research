@@ -11,12 +11,18 @@
 
 ## Session log (mới nhất trước)
 
+### [2026-06-25] DOCTRINE chốt: cải thiện AGENTIC (orchestration/inference), KHÔNG train — + P0.5–0.8 + clean-run
+- **DOCTRINE (user affirmed, BẤT BIẾN):** Agentic Deep Research lên chất lượng ở tầng **orchestration/inference** (retrieval/verify/revise-loop/prompt/evidence-select), **KHÔNG train model & KHÔNG build dataset** (giữ topic-agnostic, prompt-robust, auditable). Codify: `CLAUDE.md §2/§6.9`, `RULES #8 + Product-FAIL #7`, `plan.md P1.5`.
+- **Lever cuối = P1.5 verify-revise loop:** feed G2 per-`[N]` verdict (đã có `cite_res["verdicts"]`) ngược writer làm retry-hint surgical → revise đúng citation hỏng. KHÔNG weight.
+- **Correctness/measurement fixes session này (PR #13-17):** P0.5 bestround-ships-failing-body + smoke-hollow-book (`quality="ok"` + completeness tin được); P0.6 G2 batch-judge parser (gemma emit 1-array/dòng → fail-closed pad floor giả; fix → discrimination GOOD 0.72→1.00 vs BAD→0.06/0.00); P0.7 claim-aware excerpt (`_best_passage` argmax cosine); P0.8 `.env` auto-load (tavily im lặng OFF → giờ ON, effective providers gồm tavily).
+- **Clean-accept THẬT (đo qua nhiều run):** 7% (false floor) → 25-32% (arxiv-down) → **40% written / 0-6% block** (smoke arxiv+tavily+canonical+all-fix). Retrieval lever (tavily+arxiv) cắt block 21%→6%. Trần còn lại = writer-grounding → P1.5 (agentic, không train).
+
 ### [2026-06-23] P0-2b thực thi: soften cite-judge → faithfulness gate "xanh"
 - **Làm:** `verify.py:47-75` (JUDGE_SYS + JUDGE_BATCH_SYS) — thay dòng "**Be strict: direct match only, not topical overlap**" bằng "judge by MEANING: `supports` = evidence states/implies/**faithfully paraphrases** claim; topical-overlap-no-support KHÔNG phải supports; contradicts/unrelated giữ strict". `_VERDICT_SCORE` (no_evidence 0.3) + `min_cite_precision=0.45` **GIỮ NGUYÊN** (change tối thiểu — không hạ mù).
 - **Guard mới:** `files/eval/bench_cite_discrimination.py` gọi THẬT `verify.verify_section` trên labeled sections (GOOD paraphrase / BAD_unrelated / BAD_contradict) → assert GOOD≥0.45 ∧ gap≥0.30. Kết quả: **GOOD 0.72 (PASS) · BAD_unrelated 0.18 · BAD_contradict 0.20 · gap +0.54/+0.52**. Judge discriminate thật, KHÔNG rubber-stamp (chống "nới-để-qua" thành 1.0-giả lần 2).
 - **Validation `p0_validate3` (RLHF smoke, prose THẬT):** cite_prec spread **0.275/0.321/0.411/0.481/0.487** (≠ 1.0, ≠ floored-constant); faithful section ACCEPT `quality="ok"` cite_prec **0.481/0.487**; round dưới gate (0.275-0.411) bị **retry** (loop re-research đẩy 0.321→0.487 mới qua). Gate 0.45 cắt sạch accept/retry → **gate SỐNG, discriminate**. (arxiv timeout suốt run — degrade graceful qua wiki/ddg.)
 - **Kết:** P0-2 chuyển PARTIAL→DONE (quality "ok" giờ đạt); faithfulness gate hết INERT/fake-1.0 → SỐNG. **Bước kế = P1** (matrix HARD gate, paragraph-dedup, math-validation, near-miss rescue, held-out judge). *Follow-up nhỏ:* persist cite_precision accept-round vào state.json (field=None dù accept; BAER đọc log nên không vỡ).
-- **Docs:** RULES/CLAUDE/GLOSSARY/README/short+long-memory/plan + HF card sync post-P0-2b. Commit + PR.
+- **Docs:** RULES/CLAUDE/GLOSSARY/README/short+long-memory/plan sync post-P0-2b. Commit + PR.
 
 ### [2026-06-22] P0 thực thi: decouple G2 + grounding log-only + fix P0c → lộ P0-2b
 - **Làm:** `deep_investigate.py` — bỏ grounding khỏi gate (G3 log-only); `gate_ok = n_cites>0 AND topic≥0.50 AND cross-ref`; `verify_section` (G2) chạy khi `n_cites>0 AND topic_ok` (bất kể grounding) → cite_precision đo thật; `cite_precision=None` khi không đo (log hết phát default 1.0); best-round **topic-first**; StageE chuyển **sau-loop** gate theo best-topic; P0c `if run_seen_counts is None` (`:304`). Reviewer độc lập: **GO, 0 blocking**.
@@ -28,16 +34,16 @@
 - **Bối cảnh:** đánh giá product có grounding thật (đọc code + benchmark + nội dung sách); mọi verification holds:true.
 - **Phát hiện then chốt (verified, tự re-check bằng số):** per-source-max grounding **không bao giờ chạm 0.70** (max 0.458; quality field: 0 "ok", mọi section "degraded" cả 4 run). Vì `base_ok` cần grounding≥0.70 → **base_ok LUÔN false** → (a) clean-accept không fire; (b) `verify_section` (G2) trong `if base_ok` **KHÔNG BAO GIỜ chạy** → `cite_precision=1.0` là DEFAULT init (BAER parse 93 dòng `cite_prec=1.000` từ retry-hint, gắn nhãn nhầm "G2 REAL"); (c) StageE topic-block (cần g≥0.70) **không fire**. → **Gate cứng SỐNG duy nhất = P0a domain-evidence (~0.40 pre-writer)**; mọi verify post-writer chỉ LOG. **SUPERSEDE "faithfulness thật = G2 cite_precision" ở entry 06-21** — G2 không chạy.
 - **Điểm (harsh, evidence-based):** tổng **C+/B−**. Faithfulness C− · Eval C+ (vòng tròn: topic≡accept, 0 ground-truth) · Architecture B− (render/resume tốt; bug P0c aliasing no-op) · sách-RLHF B− (toán DPO đúng nhưng eqn malformed + LaTeX leak) · sách-605pg C+ (matrix 269/269 forced scale) · novelty B−.
-- **Thay đổi:** clean toàn bộ docs (RULES/CLAUDE/GLOSSARY/README + memory + HF card) về đúng "verify post-writer INERT, P0a là gate sống" + viết §Upgrade roadmap vào `plan.md`.
+- **Thay đổi:** clean toàn bộ docs (RULES/CLAUDE/GLOSSARY/README + memory) về đúng "verify post-writer INERT, P0a là gate sống" + viết §Upgrade roadmap vào `plan.md`.
 - **Bằng chứng:** grounding max 0.458, `bench_rlhf.log` 93×`cite_prec=1.000`, `benchmark_book.py:248`, `deep_investigate.py:729` base_ok, `:301` `run_seen_counts = x or {}` aliasing.
 
 ---
 
-### [2026-06-21] Chuẩn hóa docs + sync GitHub/HF; làm rõ grounding = ADVISORY
-- **Bối cảnh:** verify toàn bộ docs/memory vs code (audit 13-agent read-only) để hết nhiễu sau chuỗi HHEM-fix/evidence-pool/benchmark; đồng bộ GitHub + HF.
+### [2026-06-21] Chuẩn hóa docs + sync GitHub; làm rõ grounding = ADVISORY
+- **Bối cảnh:** verify toàn bộ docs/memory vs code (audit 13-agent read-only) để hết nhiễu sau chuỗi HHEM-fix/evidence-pool/benchmark; đồng bộ GitHub.
 - **Làm rõ grounding (supersede mọi note "G3 de-saturated" / "grounding ≥0.70 = gate chất lượng" ở entry cũ bên dưới):** có HAI số — `grounding`=per-source-MAX (gate dùng; là soft conjunct của `base_ok` ở 0.70 NHƯNG không block một mình: thiếu → ship `quality='degraded'`) và `grounding_cited`=strict cited (~0.06 trên prose, BAER post-hoc, **ADVISORY**). ~~Faithfulness thật = G2 cite_prec; tín hiệu phân biệt LIVE = G4 topic (G2 saturate 1.0)~~ **(⚠️ SAI — supersede 06-22: G2 KHÔNG BAO GIỜ chạy, cite_precision=1.0 là default; gate sống = P0a).**
 - **Embed:** xác nhận **UNIFIED** `bge-m3:latest` mọi path (`config.py:34`/`notes.py:111`/`query_router.py:210`/`verify.py:35`); 0 ref nomic sống — supersede note "Embed SPLIT" ở entry 06-15/06-16.
-- **Thay đổi:** chuẩn hóa RULES/CLAUDE/GLOSSARY/README (grounding advisory, embed unify, **G2 fail-CLOSED**, evidence-pool, line-refs) + HF card (G2 saturate, HHEM advisory) + refresh short-memory snapshot. **PR #9 merged → main**; HF `vudang449/agentic-deep-research-eval` synced.
+- **Thay đổi:** chuẩn hóa RULES/CLAUDE/GLOSSARY/README (grounding advisory, embed unify, **G2 fail-CLOSED**, evidence-pool, line-refs) + refresh short-memory snapshot. **PR #9 merged → main**.
 - **Bằng chứng:** `deep_investigate.py:227,729,745,850`, `faithfulness.py` grounding_score (per-source-max + `grounding_cited`), `notes.py:109/110/324`. Docs-only, 0 đổi hành vi pipeline.
 - **Còn lại:** semantic/LLM-judge eval (gap lớn nhất — BAER chỉ cơ học); deeper retriever topic ngách.
 
