@@ -241,7 +241,7 @@ def assemble_book(outline, sections, output_path):
 
 
 def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
-           providers=("arxiv", "wikipedia", "ddg"), max_rounds=2,
+           providers=_PROVIDERS_DEFAULT, max_rounds=2,
            render=False, smoke=True,
            # P0b: canonical arxiv IDs to force-inject into discovery (e.g. from gold yaml)
            canonical_arxiv_ids=None):

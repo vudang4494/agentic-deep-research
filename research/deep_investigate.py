@@ -33,6 +33,8 @@ _project_root = Path(__file__).parent.parent
 if str(_project_root) not in _sys.path:
     _sys.path.insert(0, str(_project_root))
 
+from .config import PROVIDERS_DEFAULT  # single source of truth for the default provider set (incl tavily)
+
 
 @dataclass
 class SectionSpec:
@@ -218,7 +220,7 @@ def investigate_section(
     topic_context: str = "",       # Topic description + key concepts
     prior_sections: List[dict] = None,  # [{title, content}] for cross-ref
     prior_concepts: List[str] = None,     # concepts already covered elsewhere
-    providers: tuple = ("arxiv", "wikipedia", "ddg"),
+    providers: tuple = PROVIDERS_DEFAULT,  # incl tavily; was ("arxiv","wikipedia","ddg") -> silently dropped tavily
     embed_model: str = "bge-m3:latest",  # #3 unify retrieval embed with verify-side
     reranker_model: str = "BAAI/bge-reranker-v2-m3",
     writer_model: str = "batiai/qwen3.6-35b:iq3",  # WRT: stable writer on this machine

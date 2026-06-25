@@ -10,6 +10,7 @@ Providers:
   - wikipedia : en.wikipedia.org/w/api.php + REST page summary      -- on by default
   - ddg       : DuckDuckGo HTML scrape                             -- OFF by default
 """
+import hashlib
 import json as _json
 import os
 import re
@@ -31,6 +32,45 @@ TAVILY_API = "https://api.tavily.com/search"
 TAVILY_TIMEOUT = 30.0
 BRAVE_API = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_TIMEOUT = 20.0
+
+
+def _canonical_url(url: str) -> str:
+    """Topic-agnostic URL canonicalizer (no model, no network) so the SAME page
+    surfaced by different providers OR different rounds collapses to one identity.
+    Unifies arxiv abs/pdf/html + version suffix, wikipedia slug host, and strips
+    tracking params / fragment / trailing slash. Returns input unchanged on any
+    parse failure (never raises). Used for de-dup and P0c seen-counting."""
+    try:
+        u = (url or "").strip()
+        if not u:
+            return url
+        # arxiv: /abs/<id>, /pdf/<id>(vN)(.pdf), /html/<id> -> one canonical abs (version stripped)
+        m = re.search(r"arxiv\.org/(?:abs|pdf|html)/([0-9]{4}\.[0-9]{4,5}|[a-z\-]+/[0-9]{7})", u, re.I)
+        if m:
+            return f"https://arxiv.org/abs/{m.group(1)}"
+        p = urllib.parse.urlsplit(u)
+        host = (p.netloc or "").lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if "wikipedia.org" in host and "/wiki/" in (p.path or ""):
+            host = "en.wikipedia.org"
+        keep = []
+        for k, v in urllib.parse.parse_qsl(p.query, keep_blank_values=False):
+            kl = k.lower()
+            if kl.startswith("utm_") or kl.startswith("mc_") or kl in {"ref", "fbclid", "gclid", "igshid", "source"}:
+                continue
+            keep.append((k, v))
+        path = (p.path or "/").rstrip("/") or "/"
+        return urllib.parse.urlunsplit(("https", host, path, urllib.parse.urlencode(keep), ""))
+    except Exception:
+        return url
+
+
+def _url_id(url: str) -> str:
+    """Deterministic id derived from the canonical URL so cross-provider /
+    cross-round duplicates share ONE id (notes.dedup keys on url-or-id; P0c
+    seen_counts key on id-or-url -- both now collapse to the same identity)."""
+    return "url:" + hashlib.sha1(_canonical_url(url).encode("utf-8", "ignore")).hexdigest()[:12]
 
 # Session-level kill switch: once tavily returns a recurring 4xx error we stop
 # calling it for the rest of the process so we don't burn ~30s/section retrying.
@@ -334,7 +374,7 @@ def tavily_search(query: str, k: int = 5, depth: str = "advanced") -> List[Sourc
                 except ValueError:
                     pass
         out.append(Source(
-            id=f"tavily:{abs(hash(url)) & 0xFFFFFF:06x}",
+            id=_url_id(url),
             title=title,
             url=url,
             excerpt=excerpt,
@@ -387,7 +427,7 @@ def brave_search(query: str, k: int = 5) -> List[Source]:
             except ValueError:
                 pass
         out.append(Source(
-            id=f"brave:{abs(hash(url)) & 0xFFFFFF:06x}",
+            id=_url_id(url),
             title=title, url=url, excerpt=excerpt,
             provider="brave", authors=[], year=year,
         ))
@@ -438,7 +478,7 @@ def ddg_search(query: str, k: int = 3) -> List[Source]:
             continue
         seen_urls.add(url)
         out.append(Source(
-            id=f"ddg:{abs(hash(url)) & 0xFFFFFF:06x}",
+            id=_url_id(url),
             title=title[:200] if title else url,
             url=url,
             excerpt=_excerpt(snippet, max_words=80),
@@ -456,7 +496,7 @@ def ddg_search(query: str, k: int = 3) -> List[Source]:
             continue
         seen_urls.add(url)
         out.append(Source(
-            id=f"ddg:{abs(hash(url)) & 0xFFFFFF:06x}",
+            id=_url_id(url),
             title=title[:200] if title else url,
             url=url,
             excerpt=_excerpt(title, max_words=80),
@@ -526,9 +566,12 @@ def available_providers(requested: Iterable[str]) -> List[str]:
 
 def gather(queries: Iterable[Query], providers: Iterable[str] = ("tavily", "arxiv", "wikipedia"),
            per_provider_k: int = 3) -> List[Source]:
-    """Run each query across each provider, return concatenated raw results.
+    """Run each query across each provider; collapse cross-provider/cross-round
+    duplicate pages by canonical URL, return the deduped pool.
 
-    Deduplication and ranking happen in notes.rank(), not here.
+    Ranking happens in notes.rank(); the canonical-URL collapse here ensures the
+    SAME page from two providers (or two queries/rounds) becomes ONE Source with
+    a deterministic id, so P0c seen-counting and notes.dedup key on one identity.
     Providers whose prerequisites aren't met (e.g. tavily without a key) are
     silently skipped -- the pipeline degrades to whatever IS available.
     """
@@ -546,4 +589,22 @@ def gather(queries: Iterable[Query], providers: Iterable[str] = ("tavily", "arxi
                 print(f"[research/search] {p}({qstr!r}) failed: {e}", flush=True)
                 results = []
             out.extend(results)
-    return out
+
+    # Collapse duplicates by canonical URL identity (keep first = provider/trust
+    # order). Canonicalize the survivor's url so downstream dedup/seen-counting
+    # key on the same identity. Non-URL sources fall back to their id.
+    seen_keys = set()
+    deduped: List[Source] = []
+    for s in out:
+        raw = getattr(s, "url", "") or ""
+        key = _canonical_url(raw) if raw else (getattr(s, "id", "") or "")
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        try:
+            if raw:
+                s.url = _canonical_url(raw)
+        except Exception:
+            pass
+        deduped.append(s)
+    return deduped
