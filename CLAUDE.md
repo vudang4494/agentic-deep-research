@@ -23,6 +23,7 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 ```
 
 ## 3. Pipeline THẬT (orchestrator + 12 stage)
+> Bản đồ kiến trúc tầng-cao (cấu trúc CHUẨN, map 4-tier canonical): `agentic-deep-research-architecture.md §A`. File này (§3) = chi tiết code-level/ngưỡng (nguồn sự thật vận hành).
 - **Orchestrator LIVE:** `files/deep_research_v3.py :: run_v3()`. Launcher: `run_full.sh`.
 - **Legacy v2 (ĐỪNG sửa như đang live):** `files/deep_research.py` (140KB, outline pre-fixed) + `runner.py` + `run.sh` + `watch.sh`. Vẫn được import bởi `monitor.py` / `eval/run_eval.py` → còn sống nhưng KHÔNG phải đường chính.
 - Resume qua run-dir `files/output/runs/<name>/{topic_profile,outline_profile,state}.json` — **không bao giờ viết lại Section đã có trong `state.json`.**
