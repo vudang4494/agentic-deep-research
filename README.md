@@ -1,94 +1,87 @@
 # agentic — Local-first Agentic Deep Research
 
-> Hand it a topic. It **discovers** the scope, lets the **outline emerge from the evidence**, then runs
-> a per-section **research → rank → gate → write → verify** loop and assembles a LaTeX-typeset technical
+> Hand it a topic. It **discovers** the scope, drafts an evidence-driven **outline**, then runs a
+> per-section **research → rank → gate → write → verify** loop and assembles a LaTeX-typeset technical
 > book — **100% on local models, no API key, every claim gated and auditable.**
 
 <p align="left">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-blue.svg">
   <img alt="python"  src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
   <img alt="runtime" src="https://img.shields.io/badge/runtime-Ollama%20(local)-black.svg">
-  <img alt="render"  src="https://img.shields.io/badge/render-tectonic%20%2F%20WeasyPrint-orange.svg">
-  <img alt="status"  src="https://img.shields.io/badge/status-full--run%20validated-success.svg">
+  <img alt="demo"    src="https://img.shields.io/badge/demo-995--page%20book-success.svg">
+  <img alt="dedup"   src="https://img.shields.io/badge/duplicate%20content-0-success.svg">
 </p>
 
 It is **not** a text generator. The goal is an on-topic, grounded, **auditable** book: drift, repetition,
-and ungrounded claims are blocked at gates, not patched in the writer.
-
-**It improves at the orchestration / inference layer — never by training.** Quality comes from
-retrieval, verification, the revise loop, prompting, and evidence selection — *not* from fine-tuning the
-models or building datasets. That keeps it **topic-agnostic**, prompt-robust, and **auditable** (the loop
-leaves a trace; weights don't).
+and ungrounded claims are blocked at gates, not patched in the writer. **All quality comes from the
+orchestration layer** — retrieval, verification, the revise loop, prompting, evidence selection — **never
+from training the models.** That keeps it topic-agnostic, prompt-robust, and auditable.
 
 ---
 
-## See it in action
+## See it run — 995-page book, downloadable
 
-A real end-to-end result is committed so you can judge it by the output, not the claims:
+A full end-to-end output is published so you can judge it by the artifact, not the claims:
 
-**[`output/runs/agentic_2025_full/`](output/runs/agentic_2025_full/)**
-- [`book.pdf`](output/runs/agentic_2025_full/book.pdf) — **605 pages**, tectonic-typeset math, per-section references.
-- [`book_eval_report.md`](output/runs/agentic_2025_full/book_eval_report.md) — the **BAER** transparent quality report (deterministic, reproducible).
-- [`README.md`](output/runs/agentic_2025_full/README.md) — how it was generated + honest caveats.
+### ▸ [**Download `book.pdf` — RLHF, 995 pages**](https://github.com/vudang4494/agentic/releases/tag/book900-rlhf-demo)  *(GitHub Release)*
 
-Headline numbers (BAER): 288 sections · ~258k words · **0 near-duplicate sections** · **90% of sections carry a formula** · coverage 6/6 must-cover + 10/10 canonical terms · references 78.5% on-topic.
+| Metric | Value | How verified |
+|---|---|---|
+| Length | **995 pages** · 504 sections · ~475k words | `pdfinfo` |
+| **Duplicate content** | **0 sections, 0 paragraphs** | `eval/check_dedup.py` (cosine ≥0.85 / ≥0.92, bge-m3) |
+| Technical depth | ~6,200 inline formulas · ~1,165 equation blocks | counted from `book.md` |
+| Citations | ~16 per section, 100% of sections cited | from `state.json` |
+| Topic purity (G4) | mean **0.922**, 100% ≥0.50 | gemma judge, per section |
+| Completeness | **2.6%** sections blocked off-topic | down from 34% in early runs |
 
----
-
-## Model stack (all local, via Ollama + transformers)
-
-| Role | Model | Notes |
-|------|-------|-------|
-| Discovery / Outline / Query-gen / **Judge** | `gemma4:e4b` | topic profile, evidence-driven outline, query gen, topic + citation judges |
-| **Writer** | `batiai/qwen3.6-35b:iq3` | prose + formulas + algorithms, grounded in cited evidence |
-| Embedding (retrieval + verify) | `bge-m3:latest` | unified dense retrieval / dedup / cosine prefilter |
-| Rerank | `BAAI/bge-reranker-v2-m3` | cross-encoder (transformers, not Ollama) |
-| Grounding | `vectara/hallucination_evaluation_model` (HHEM v2) | per-claim entailment (advisory signal — see note below) |
-
-> **Invariant — Verifier ≠ Writer:** the writer is **qwen**; grounding is scored by **HHEM** and
-> topic/citation by **gemma**. The writer never grades its own prose (no self-preference bias).
-> **LOCAL-ONLY:** every model runs on `localhost` — no Claude/OpenAI/external API at runtime.
+A second example is browsable in-repo (no download): [`output/runs/agentic_2025_full/`](output/runs/agentic_2025_full/) — 605 pages.
 
 ---
 
-## Pipeline
+## Results that hold up to scrutiny
+
+Every number below was **re-measured independently** (not taken from the run's own logs):
+
+- **Zero duplicate content at 995 pages.** Section- and paragraph-level cosine dedup both pass with 0 hits — the anti-duplication levers hold at full scale, not just on smoke tests.
+- **The faithfulness gate discriminates — it does not rubber-stamp.** Re-running the citation judge (G2) on a stratified sample: sections the pipeline labelled `ok` score **0.55** mean citation-precision vs **0.30** for `degraded` (gap **+0.25**) — the gate genuinely separates faithful from weak prose.
+- **Citation-hygiene cleanup, −97.6% noise.** The writer used to name-drop the book's own section titles inline as if they were external papers (~1,250 phrases, 98% of sections). A deterministic Stage-F pass ([`research/decite.py`](research/decite.py)) strips them while preserving every real `[N]` and external reference — verified by [`eval/test_decite.py`](eval/test_decite.py).
+- **Honest gates.** Grounding (HHEM) is advisory (strict-NLI under-scores synthesized prose); the *enforced* checks are domain (P0a, pre-writer) + topic (G4) + citation-precision (G2). Thresholds live in **code**, not docs.
+
+---
+
+## Architecture
 
 ```
-Topic ─▶ Discovery ─▶ Outline (from evidence) ─▶ Deep Investigation (per section) ─▶ Assemble ─▶ Render
+Topic ─▶ Discovery ─▶ Outline (evidence-driven) ─▶ Deep Investigation (per section) ─▶ Assemble ─▶ Render
 ```
 
 | # | Stage | Model | What happens |
 |---|-------|-------|--------------|
-| 0 | **Discovery** | gemma4:e4b | scoping queries → `TopicProfile` (canonical terms, must-cover, out-of-scope) + **P0b** canonical-paper injection |
-| 1 | **Outline** | gemma4:e4b | **chunked** drafting — chapter skeleton, then per-chapter sections that *emerge from that chapter's evidence* (kills the archetype "matrix") |
-| 2 | **Deep Investigation** (loop, per section) | ↓ | query-gen → search (arXiv/Wikipedia/DDG) → cosine **prefilter** → RRF rank + cross-encoder rerank → **gates** → write → **verify** |
-| 3 | **Assemble** | — | `book.md` + math hygiene (single-source [`research/mathfix.py`](research/mathfix.py)) + per-section references |
-| 4 | **Render** (`--render`) | — | pandoc → **tectonic** (LaTeX, `-Z continue-on-errors`); WeasyPrint fallback |
+| 0 | **Discovery** | gemma4:e4b | scoping queries → `TopicProfile` (canonical terms, must-cover, out-of-scope) + canonical-paper injection (P0b) |
+| 1 | **Outline** | gemma4:e4b | chunked drafting — chapter skeleton, then per-chapter sections drawn from that chapter's evidence |
+| 2 | **Deep Investigation** (loop / section) | gemma + qwen | query-gen → search (arXiv/Tavily/Wiki/DDG) → cosine prefilter → RRF rank + cross-encoder rerank → **gates** → write → **verify → revise** |
+| 3 | **Assemble** | — | `book.md` + math hygiene + intra-book citation hygiene + per-section references |
+| 4 | **Render** (`--render`) | — | pandoc → **tectonic** (LaTeX, continue-on-errors); WeasyPrint fallback |
 
-### The gates — what *actually* enforces (honest; P0 applied 2026-06-22)
-- **P0a** domain gate — the **primary live hard gate**: hard-blocks a section whose *evidence* is off-domain (≈0.40, **pre-writer**). ~27% of sections block here.
-- **P0b** canonical inject / **P0c** seen-penalty — foundational papers are protected (exempt from prefilter + dedup); over-represented sources penalized. *(P0c cross-section propagation was a single-run no-op — **fixed in P0**.)*
-- **Prefilter** — drop sources below cosine **0.48** to the section (grey domains 0.65); canonical exempt.
-- **Post-writer verify (P0 + P0-2b):** grounding (G3) is now **log-only/advisory** (removed from the gate — HHEM strict-NLI under-scores synthesized prose). **Topic (G4) is enforced** (clean-accept + a topic-drift block). **Citation precision (G2) is now a live gate** — it runs for real (it was previously wrapped behind a dead grounding bar; `cite_precision = 1.0` used to be an un-measured default) **and the judge was softened (P0-2b) to credit faithful paraphrase/implication**, so on real writer prose a faithful section clears the 0.45 bar (~0.48 observed) and clean-accepts (`quality="ok"`), while a weak/off-source section still floors below it (`degraded`).
-- **The judge discriminates, it does not rubber-stamp:** a guard benchmark (`eval/bench_cite_discrimination.py`) confirms a faithful section scores **0.72** while off-topic and contradicting citations score **0.18 / 0.20** (gap +0.5) — so softening the prompt restored signal without collapsing back to a fake 1.0.
+### Model stack — all local (Ollama + transformers)
 
-> Thresholds live in **code** (`deep_investigate.py`, `notes.py`, `config.py`), not docs — see [RULES.md](RULES.md) for the full table.
+| Role | Model |
+|------|-------|
+| Discovery / Outline / Query-gen / **Judge** | `gemma4:e4b` |
+| **Writer** | `batiai/qwen3.6-35b:iq3` |
+| Embedding (retrieval + verify + dedup) | `bge-m3:latest` |
+| Rerank | `BAAI/bge-reranker-v2-m3` (cross-encoder) |
+| Grounding | `vectara/hallucination_evaluation_model` (HHEM v2, advisory) |
 
----
+> **Verifier ≠ Writer:** the writer is **qwen**; grounding is scored by **HHEM**, topic/citation by **gemma**.
+> The writer never grades its own prose. **LOCAL-ONLY** — no Claude/OpenAI/external API at runtime.
 
-## Quality eval — BAER (transparent, deterministic)
+### The gates — what actually enforces
 
-Judge any finished run by numbers, not adjectives:
-
-```bash
-python3 eval/benchmark_book.py <run-name>   # -> book_eval_report.md + book_eval.json
-```
-
-**B**enchmark (pages/words/citations) · **A**nalyze (cross-section redundancy, anti-matrix, reference
-on-topic %, coverage, technical-depth %) · **E**val (gates labelled **real vs inert**) · **R**eport.
-Calls no model → same run always yields the same report. Companion probes (these DO call the local
-judge): `bench_cite_discrimination.py` (G2 citation-judge health — faithful vs off-source/contradicting),
-`bench_hhem_discrimination.py` (grounding scorer health), `bench_math_split_bm25.py` (math/BM25 safety).
+- **P0a domain gate** — primary live hard gate: blocks a section whose *evidence* is off-domain (≈0.40, **pre-writer**).
+- **P0b / P0c** — canonical papers are protected (exempt from prefilter + dedup); over-represented sources penalized.
+- **Prefilter** — drop sources below cosine 0.48 to the section (grey domains 0.65); canonical exempt.
+- **Verify (post-writer)** — topic (G4) enforced + topic-drift block; citation-precision (G2) is a live gate (faithful prose clears 0.45, weak/off-source floors below → `degraded`); grounding (G3) advisory.
 
 ---
 
@@ -103,7 +96,7 @@ ollama pull bge-m3:latest
 
 # 2. Python deps + render toolchain
 pip install -r requirements.txt
-brew install pandoc tectonic          # tectonic = paper-quality LaTeX PDF
+brew install pandoc tectonic
 
 # 3. (optional) extra web search — degrades gracefully without
 cp .env.example .env                  # add TAVILY_API_KEY if you have one
@@ -113,20 +106,14 @@ python3 pipeline/deep_research_v3.py --topic "RLHF" --out-name rlhf_v4 \
   --canonical-arxiv-ids "2203.02155,2305.18290,1706.03762" --no-smoke --render
 #   or: ./run_full.sh
 
-# 5. Evaluate the result
-python3 eval/benchmark_book.py rlhf_v4
-```
-
-Monitor a long run / inspect a finished one:
-```bash
-python3 tools/monitor.py                      # live progress across runs
+# 5. Inspect / verify the result
 python3 tools/report.py output/runs/rlhf_v4   # per-section metrics from state.json
-python3 eval/smoke_test_p0.py --topic "Transformer" --canonical-ids "1706.03762"  # quick gate check
+python3 eval/check_dedup.py output/runs/rlhf_v4   # zero-duplicate acceptance test
 ```
 
-Each run lands in `output/runs/<out-name>/` (`book.{md,pdf}`, `book_eval_report.md`,
-`state.json`, `topic_profile.json`, `outline_profile.json`). Runs are **resume-safe** — re-running
-continues from `state.json` and never rewrites an accepted section.
+Each run lands in `output/runs/<out-name>/` (`book.{md,pdf}`, `state.json`, `topic_profile.json`,
+`outline_profile.json`). Runs are **resume-safe** — re-running continues from `state.json` and never
+rewrites an accepted section.
 
 ### CLI (orchestrator v3)
 
@@ -136,7 +123,6 @@ continues from `state.json` and never rewrites an accepted section.
 | `--out-name` | from topic | Output folder |
 | `--n-chapters N` / `--sections-per-chapter N` | from discovery | Outline size hints |
 | `--canonical-arxiv-ids "id,id"` | none | Force-inject + protect foundational papers (P0b) |
-| `--providers arxiv wikipedia ddg` | all 3 | Retrieval providers |
 | `--max-rounds N` | 3 | Max research rounds per section |
 | `--no-smoke` | smoke (2 ch) | Run the full book |
 | `--render` | off | Render PDF |
@@ -148,42 +134,23 @@ continues from `state.json` and never rewrites an accepted section.
 ```
 AgentDeepLearning/
 ├── pipeline/deep_research_v3.py    # orchestrator (LIVE) — run_v3()
-├── research/                       # stage layer (relative-import package; canonical 4-tier)
-│   ├── discovery.py                # Stage 0 — TopicProfile + P0b canonical inject
-│   ├── outline_from_research.py    # Stage 1 — chunked, evidence-driven outline
+├── research/                       # stage layer (relative-import package)
+│   ├── discovery.py                # Stage 0 — TopicProfile + canonical inject
+│   ├── outline_from_research.py    # Stage 1 — evidence-driven outline
 │   ├── deep_investigate.py         # Stage 2 — per-section research/gate/write/verify loop
-│   ├── query_gen.py · query_router.py · search.py · rerank.py
-│   ├── notes.py                    # RRF rank + P0a/P0c gates + prefilter + math-safe BM25
-│   ├── faithfulness.py             # G3 grounding (HHEM, advisory)
-│   ├── verify.py                   # G4 topic + G2 citation (gemma), cross-ref
-│   ├── mathfix.py                  # single-source math/LaTeX normalization (render-safe)
-│   ├── embeddings.py · fetch.py · config.py · canonical_seeds.py · types.py
-│   └── cache/                      # URL-fetch cache (gitignored, regenerated on demand)
-├── eval/                           # quality harness
-│   ├── benchmark_book.py           # BAER quality report
-│   ├── bench_cite_discrimination.py# G2 citation-judge health (faithful vs off-source)
-│   ├── bench_hhem_discrimination.py · bench_math_split_bm25.py
-│   ├── test_math_char_safety.py · test_verify_optim.py · smoke_test_p0.py
-│   └── archive/                    # retired one-off eval scripts
+│   ├── search.py · rerank.py · notes.py        # retrieval + RRF rank + P0a/P0c gates + prefilter
+│   ├── verify.py · faithfulness.py             # G4 topic + G2 citation (gemma) · G3 grounding (HHEM)
+│   ├── mathfix.py · decite.py                  # render-safe math + intra-book citation hygiene
+│   └── config.py · types.py · embeddings.py · fetch.py · canonical_seeds.py
+├── eval/                           # quality harness — check_dedup.py · test_decite.py · benchmark_book.py · ...
 ├── scripts/render_book.py          # Stage 4 — pandoc + tectonic / weasyprint
-├── tools/                          # monitor.py · report.py · mcp_server.py · modelfiles/
-├── legacy/                         # v2 stack — deep_research.py · runner.py · run.sh · watch.sh
-├── docs/                           # RULES.md · plan.md · architecture · GLOSSARY.md · archive/
-├── memory/                         # short-memory.md · long-memory.md
+├── tools/                          # monitor.py · report.py · mcp_server.py
+├── docs/                           # RULES.md (gate/threshold table) · GLOSSARY.md · architecture
 ├── output/runs/<name>/             # per-run output (gitignored; committed example: agentic_2025_full)
-├── run_full.sh                     # LIVE launcher
 └── CLAUDE.md · README.md · requirements.txt
 ```
 
-Operational doctrine: [CLAUDE.md](CLAUDE.md) (pipeline + invariants) · [docs/RULES.md](docs/RULES.md) (gate/threshold table) · [docs/GLOSSARY.md](docs/GLOSSARY.md) (terms).
-
----
-
-## Notable fixes that make it auditable
-- **Grounding scorer revived (now advisory)** — HHEM was a no-op under transformers 5.x (T5 `embed_tokens` loaded as zeros → constant ~0.502 for every pair). Fixed by re-tying embeddings in `_get_hhem` + a startup discrimination-assertion (no version pin). It now discriminates clean NLI pairs, but strict-NLI under-scores synthesized prose (~0.05–0.10 even when faithful), so grounding is treated as an **advisory** signal — the enforced faithfulness check is citation-precision (G2) and the live quality signal is topic (G4).
-- **Outline emerges from evidence** — chunked drafting replaces the single giant-JSON call that overflowed the model and fell back to a templated topic×archetype matrix.
-- **Render never dies on one bad formula** — `mathfix` neutralizes broken LaTeX spans to literal, escapes raw `%`/stray `$`, bounds unbalanced-brace paragraphs, and is idempotent; tectonic renders a 250k-word book directly.
-- **No internal logs leak into the book**; raw `[N]` citations resolve to per-section references.
+Operational doctrine: [CLAUDE.md](CLAUDE.md) · gate/threshold table: [docs/RULES.md](docs/RULES.md) · terms: [docs/GLOSSARY.md](docs/GLOSSARY.md).
 
 ---
 
