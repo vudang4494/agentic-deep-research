@@ -286,6 +286,59 @@ def draft_outline_chunked(topic_profile, evidence_map, n_chapters, sections_per_
     }
 
 
+# ---- Shared title-similarity helpers (used by audit + deterministic enforcement) ----
+_TITLE_STOPWORDS = {
+    "of", "the", "a", "an", "in", "for", "to", "and", "or", "with", "on", "by",
+    "from", "as", "its", "how", "why", "what", "when", "into", "via", "using", "at",
+}
+
+
+def _title_tokens(title: str) -> set:
+    return {w.lower() for w in re.findall(r"[A-Za-z0-9]+", str(title))
+            if w.lower() not in _TITLE_STOPWORDS}
+
+
+def _title_jaccard(a: str, b: str) -> float:
+    ta, tb = _title_tokens(a), _title_tokens(b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _base_prefix(title: str) -> str:
+    """Family key for a '{base}: {aspect}' matrix title. Returns '' when the title is
+    not a base:aspect form. 'Policy Optimization: A Comparative Analysis: Core Mechanisms'
+    -> 'policy optimization: a comparative analysis' (aspect = final ': ' segment)."""
+    parts = [p.strip() for p in str(title).split(":")]
+    if len(parts) >= 3:
+        return ": ".join(parts[:-1]).strip().lower()
+    if len(parts) == 2 and len(_title_tokens(parts[0])) >= 2:
+        return parts[0].strip().lower()
+    return ""
+
+
+# A base:aspect family up to this size is acceptable depth; ABOVE it is a suffix-matrix.
+# Detector flags families that EXCEED the cap; enforcement collapses down to exactly it,
+# so a repaired outline (family == cap) no longer trips the audit.
+_ASPECT_MATRIX_CAP = 3
+
+
+def _aspect_matrix_families(chapters: list, min_members: int = _ASPECT_MATRIX_CAP + 1) -> List[str]:
+    """Chapters whose sections repeat a common '{base}: {aspect}' prefix >= min_members
+    times -- the suffix-matrix that produced the Ch5 near-dup block (jaccard 0.58-0.70)."""
+    out = []
+    for ch in chapters:
+        fam: dict = {}
+        for sec in ch.get("sections", []):
+            base = _base_prefix(sec.get("t", ""))
+            if base:
+                fam[base] = fam.get(base, 0) + 1
+        for base, cnt in fam.items():
+            if cnt >= min_members:
+                out.append(f'Ch{ch.get("n", "?")}: "{base}" x{cnt}')
+    return out
+
+
 def audit_outline(parsed: dict, topic_profile, evidence_map: List[dict]) -> dict:
     chapters = parsed.get("chapters", []) if isinstance(parsed, dict) else []
     chapter_titles = [str(ch.get("t", "")).strip() for ch in chapters]
@@ -432,7 +485,13 @@ def audit_outline(parsed: dict, topic_profile, evidence_map: List[dict]) -> dict
                     matrix_patterns.append(f"[SECTION] '{sec.get('t', '')}'")
                     break
 
+    # Suffix aspect-matrix: '{base}: {aspect}' repeated past the cap in a chapter (the Ch5
+    # pattern -> near-dup content). Detected + enforced (collapsed) deterministically.
+    aspect_matrix = _aspect_matrix_families(chapters)
+
     issues = []
+    if aspect_matrix:
+        issues.append("aspect_matrix")
     if duplicate_sections > max(2, int(len(section_titles) * 0.5)):
         issues.append("too_many_duplicate_section_titles")
     if generic_chapters:
@@ -470,6 +529,84 @@ def audit_outline(parsed: dict, topic_profile, evidence_map: List[dict]) -> dict
         "coherence_issues": coherence_issues[:5],
         "part_n_patterns": part_n_patterns[:10],
         "matrix_patterns": matrix_patterns[:10],
+        "aspect_matrix_families": aspect_matrix[:10],
+    }
+
+
+def enforce_outline_structure(outline, axis_cap: int = _ASPECT_MATRIX_CAP,
+                              cross_jaccard: float = 0.72) -> dict:
+    """Deterministic anti-matrix / anti-redundancy repair applied to the outline BEFORE
+    Stage 2 (Guardrail 3: kill matrix pattern at the OUTLINE, not the writer; Guardrail 4:
+    fix at the gate). Runs on EVERY path (chunked / LLM / fallback) so `audit.ok=false`
+    can no longer ship a known-bad outline unchanged. Idempotent on a clean outline.
+
+    Two repairs, both operate on section titles (no LLM, no embedding -- deterministic):
+      A. intra-chapter aspect-matrix collapse -- a '{base}: {aspect}' family with >= 3
+         members (the Ch5 'Policy Optimization ...: {Core Mechanisms|Design|...|Open
+         Problems}' pattern that produced near-dup content) is capped to `axis_cap`
+         sections. Surplus aspects' `must_cover_terms` are MERGED into the last kept
+         section so coverage is preserved, only the redundant sections are dropped.
+      B. cross-chapter near-dup drop -- a section whose title-jaccard >= `cross_jaccard`
+         to an earlier kept section in a DIFFERENT chapter is redundant and dropped.
+    Section numbers are renumbered per chapter after removal. Mutates outline.chapters;
+    returns a summary for the audit log.
+    """
+    chapters = outline.chapters
+    removed_matrix: List[str] = []
+    removed_cross: List[str] = []
+    merged_terms = 0
+
+    # ---- Repair A: intra-chapter aspect-matrix collapse ----
+    for ch in chapters:
+        secs = ch.get("sections", [])
+        families: dict = {}
+        for idx, s in enumerate(secs):
+            base = _base_prefix(s.get("t", ""))
+            if base:
+                families.setdefault(base, []).append(idx)
+        drop: set = set()
+        for base, idxs in families.items():
+            if len(idxs) < 3:
+                continue  # a handful of base:aspect titles is fine; only a matrix is not
+            keep_idxs = idxs[:axis_cap]
+            surplus = idxs[axis_cap:]
+            sink = secs[keep_idxs[-1]]
+            sink_terms = list(sink.get("must_cover_terms", []) or [])
+            for si in surplus:
+                for t in (secs[si].get("must_cover_terms", []) or []):
+                    if t and t not in sink_terms:
+                        sink_terms.append(t)
+                        merged_terms += 1
+                drop.add(si)
+                removed_matrix.append(secs[si].get("t", ""))
+            sink["must_cover_terms"] = sink_terms
+        if drop:
+            ch["sections"] = [s for i, s in enumerate(secs) if i not in drop]
+
+    # ---- Repair B: cross-chapter near-dup drop ----
+    kept: List[tuple] = []  # (title, chapter_index)
+    for ci, ch in enumerate(chapters):
+        new_secs = []
+        for s in ch.get("sections", []):
+            t = s.get("t", "")
+            if any(cj != ci and _title_jaccard(t, kt) >= cross_jaccard for kt, cj in kept):
+                removed_cross.append(t)
+                continue
+            kept.append((t, ci))
+            new_secs.append(s)
+        ch["sections"] = new_secs
+
+    # ---- renumber sections per chapter (contiguous 'n' after removals) ----
+    for ch in chapters:
+        for j, s in enumerate(ch.get("sections", []), 1):
+            s["n"] = j
+
+    return {
+        "aspect_matrix_removed": len(removed_matrix),
+        "cross_chapter_removed": len(removed_cross),
+        "coverage_terms_merged": merged_terms,
+        "removed_matrix_titles": removed_matrix[:10],
+        "removed_cross_titles": removed_cross[:10],
     }
 
 
@@ -561,6 +698,21 @@ def _postprocess_outline(outline, topic_profile) -> None:
     # and wires depends_on edges for narrative coherence. Differentiates rather than
     # drops, so the book keeps its section count (page target) while shedding repeats.
     _relate_and_differentiate_sections(outline, topic_profile)
+
+    # ENFORCE (Guardrail 3+4): deterministically collapse aspect-matrices + cross-chapter
+    # near-dups BEFORE Stage 2. This closes the gap where a chunked outline with
+    # audit.ok=false was kept UNCHANGED (soft issues never repaired) -- the source of the
+    # 43 near-dup section pairs. Re-audit afterwards so the STORED audit reflects the
+    # repaired outline, not the pre-repair draft.
+    enforcement = enforce_outline_structure(outline)
+    if enforcement["aspect_matrix_removed"] or enforcement["cross_chapter_removed"]:
+        print(f"[OUTLINE] ENFORCED: collapsed {enforcement['aspect_matrix_removed']} "
+              f"aspect-matrix + dropped {enforcement['cross_chapter_removed']} cross-chapter "
+              f"dup sections ({enforcement['coverage_terms_merged']} coverage terms merged)")
+        outline.outline_audit = audit_outline(
+            {"chapters": outline.chapters, "title": outline.title},
+            topic_profile, outline.evidence_map)
+    outline.outline_audit["enforcement"] = enforcement
 
     n_out_chapters = len(outline.chapters)
     n_out_sections = sum(len(ch.get("sections", [])) for ch in outline.chapters)
