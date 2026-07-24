@@ -29,7 +29,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # repo root
 
 from research import verify as V
-from research.config import JUDGE_MODEL, WRITER_MODEL, EMBED_MODEL
+from research.config import JUDGE_MODEL, WRITER_MODEL
 from research._ollama import OLLAMA_BASE
 from research.types import Source
 from bench_cite_discrimination import (
@@ -156,11 +156,14 @@ def main():
     print(f"inter-judge agreement      : {agree:.0%}")
     print(f"Cohen's kappa (support/not): {kappa:.3f}" if kappa is not None else "Cohen's kappa: n/a")
     print("-" * 78)
+    _proxy = ("  NOTE: the held-out model is the WRITER family, used offline as a proxy -- it "
+              "still cross-checks the gemma JUDGE (different family), but a fully third-party "
+              "model would be a stronger, fully-independent check." if held == WRITER_MODEL else "")
     if kappa is None:
         verdict = "DEGENERATE (one judge gave a constant label) -- inspect above."
     elif kappa >= 0.6 and g_acc >= 0.8:
-        verdict = ("CORROBORATED -- an independent family agrees substantially with gemma AND "
-                   "gemma tracks ground truth. The eval is not gemma-circular.")
+        verdict = ("CORROBORATED -- a different model family agrees substantially with gemma AND "
+                   "gemma tracks ground truth. The eval is not gemma-circular." + _proxy)
     elif g_acc < 0.8:
         verdict = ("GEMMA OFF GROUND TRUTH on this probe -- the pipeline judge itself is "
                    "mis-calling labeled cases; investigate before trusting G2.")
