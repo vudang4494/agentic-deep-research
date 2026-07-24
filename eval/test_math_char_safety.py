@@ -128,6 +128,12 @@ def test_mathfix_render_robustness():
     check("valid $x$ pair preserved", "$x$" in o, o)
     o = balance_inline_dollar(r"param $\delta$ and a dangling $ here")
     check("dangling trailing $ escaped", o.count("$") - o.count(r"\$") == 2, o)  # only the $\delta$ pair live
+    # 4 math validation probes (P1-3)
+    check("probe 1: \\leftarrow valid", _math_span_valid(r"r_i \leftarrow r_i + 1"))
+    check("probe 2: \\rightarrow valid", _math_span_valid(r"a \rightarrow b"))
+    check("probe 3: unclosed paren invalid", not _math_span_valid(r"\exp(a + b"))
+    check("probe 4: \\coloneqq valid", _math_span_valid(r"x \coloneqq y"))
+
     # undefined macro (not in the tectonic allowlist) -> neutralized to literal code, not fed to TeX.
     check("known macro span valid", _math_span_valid(r"\frac{a}{b}") and _math_span_valid(r"\mathbb{R}"))
     check("undefined macro span invalid (neutralized)", not _math_span_valid(r"\frobnicate{x}"))

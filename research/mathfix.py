@@ -215,18 +215,21 @@ array matrix pmatrix bmatrix Bmatrix vmatrix Vmatrix smallmatrix substack
 displaystyle scriptstyle scriptscriptstyle limits nolimits stackrel overset underset
 angle triangle square diamond Box blacksquare flat natural sharp surd checkmark
 bf rm it sf tt cal sl em scriptsize footnotesize small large Large
-lt gt
+lt gt coloneqq coloneq eqdef
 """.split())
 
 
 def _math_span_valid(inner):
-    """Render-safe check: braces balanced (honoring \\{ \\}), \\left/\\right paired, and every macro
-    is in the tectonic-renderable allowlist. A span failing ANY of these is neutralized to literal
-    code so it cannot crash the render."""
-    s = inner.replace(r"\{", "").replace(r"\}", "")
-    if s.count("{") != s.count("}"):
+    r"""Render-safe check: braces and parens balanced (honoring \{ \}, \( \)), \left/\right paired,
+    and every macro is in the tectonic-renderable allowlist. A span failing ANY of these is
+    neutralized to literal code so it cannot crash the render."""
+    s_brace = inner.replace(r"\{", "").replace(r"\}", "")
+    if s_brace.count("{") != s_brace.count("}"):
         return False
-    if inner.count(r"\left") != inner.count(r"\right"):
+    s_paren = inner.replace(r"\(", "").replace(r"\)", "")
+    if s_paren.count("(") != s_paren.count(")"):
+        return False
+    if len(re.findall(r"\\left(?![A-Za-z])", inner)) != len(re.findall(r"\\right(?![A-Za-z])", inner)):
         return False
     for mac in set(re.findall(r"\\([A-Za-z]+)", inner)):
         if mac not in _MACRO_ALLOWLIST:

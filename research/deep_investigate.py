@@ -322,7 +322,18 @@ def investigate_section(
     prior_query_sigs: set = set()
     prior_source_ids: set = set()
 
-    for round_n in range(1, max_rounds + 1):
+    # #P1-4 near-miss rescue: a section whose evidence lands JUST below the P0a domain gate
+    # at the final round earns ONE extra focused re-query (anchored on must_cover terms) before
+    # it is BLOCKED. Fires once, only for a near-miss (close to the bar, not wildly off-domain).
+    # The rescued round STILL has to clear ev_threshold to be written -- this buys a better
+    # retrieval attempt, it does NOT lower the bar (CLAUDE.md guardrail 4/6).
+    _max_r = max_rounds
+    _near_miss_used = False
+    _NEAR_MISS_DELTA = 0.10
+
+    round_n = 0
+    while round_n < _max_r:
+        round_n += 1
         research_rounds += 1
         t_r = time.time()
 
@@ -553,6 +564,26 @@ def investigate_section(
                 print(f"  [R{round_n}] RETRY: evidence domain mismatch")
                 continue
             else:
+                # #P1-4 NEAR-MISS rescue: evidence is CLOSE to the bar (not wildly off-domain)
+                # and the rescue hasn't been spent -> grant ONE focused re-query round anchored
+                # on must_cover terms before blocking. The continue re-enters the full round
+                # machinery with a must_cover-focused hint; the rescued round still must clear
+                # the same ev_threshold, so it never lets an off-domain section through.
+                if (not _near_miss_used
+                        and ev_topic_rel >= ev_threshold - _NEAR_MISS_DELTA):
+                    _near_miss_used = True
+                    _max_r += 1
+                    _rescue_terms = ", ".join(spec.must_cover_terms[:6]) or spec.title
+                    current_hint = (
+                        f"NEAR-MISS re-query: evidence relevance={ev_topic_rel:.2f} is just under "
+                        f"the {ev_threshold:.2f} domain bar. Search ONLY for sources that explicitly "
+                        f"cover: {_rescue_terms}. Name the exact methods/concepts -- do NOT broaden "
+                        f"to adjacent domains."
+                    )
+                    print(f"  [R{round_n}] P0a NEAR-MISS ({ev_topic_rel:.3f} >= "
+                          f"{ev_threshold - _NEAR_MISS_DELTA:.2f}): granting 1 focused re-query on "
+                          f"must_cover before BLOCK")
+                    continue
                 # HARD BLOCK: section with wrong-domain evidence cannot be written.
                 # Writer would produce rlhf_v3-style garbage (143w of RAG for RLHF section).
                 # Mark as blocked so the run can be audited and retried with correct queries.
@@ -829,8 +860,16 @@ def investigate_section(
             numeric_refs = re.findall(r"\b(?:Section|Chapter)\s+\d+(?:\.\d+)?", content)
             numeric_hint = (f" Replace numeric refs ({', '.join(numeric_refs[:3])}) with exact section TITLES."
                             if numeric_refs else "")
-            cite_hint = (" Some citations do not support their claim -- attach the correct [N] to each fact."
-                         if (cite_precision is not None and cite_precision < min_cite_precision) else "")
+            _bad_cites = [v for v in _cite_verdicts
+                          if v.get("verdict") in ("unrelated", "contradicts", "no_evidence", "partial")] if _cite_verdicts else []
+            if _bad_cites:
+                bad_summary = ", ".join(f"[{v.get('n')}] {v.get('verdict')}" for v in _bad_cites[:5])
+                cite_hint = f" Citation issues on {len(_bad_cites)} source(s): {bad_summary}. Reattach correct [N] or rephrase claims."
+            elif (cite_precision is not None and cite_precision < min_cite_precision):
+                cite_hint = " Some citations do not support their claim -- attach the correct [N] to each fact."
+            else:
+                cite_hint = ""
+
             cite_str = f", cite_prec={cite_precision:.3f}" if cite_precision is not None else ""
             dup_hint = (f" DUPLICATE: this draft is ~{round_dup_cos:.2f} cosine to earlier section '{round_dup_who}'. "
                         f"Rewrite to cover ONLY the complementary angle unique to THIS section; reference "
@@ -850,15 +889,12 @@ def investigate_section(
             if (cite_precision is not None and cite_precision < min_cite_precision
                     and topic_ok and not is_near_dup
                     and (not prior_sections or cross_refs_found >= min_refs_needed)
-                    and _cite_verdicts):
-                _bad = [v for v in _cite_verdicts
-                        if v.get("verdict") in ("unrelated", "contradicts", "no_evidence", "partial")]
-                if _bad:
-                    revise_fixlist = "\n".join(
-                        f"  [{v.get('n')}] verdict={v.get('verdict')}: {(v.get('reason') or v.get('claim') or '')[:160]}"
-                        for v in _bad[:12])
-                    revise_draft = content
-                    print(f"  [R{round_n}] verify-revise armed: {len(_bad)} citation(s) to repair next round")
+                    and _bad_cites):
+                revise_fixlist = "\n".join(
+                    f"  [{v.get('n')}] verdict={v.get('verdict')}: claim=\"{(v.get('claim') or '')[:100]}\" | reason: {(v.get('reason') or '')[:120]}"
+                    for v in _bad_cites[:12])
+                revise_draft = content
+                print(f"  [R{round_n}] verify-revise armed: {len(_bad_cites)} citation(s) to repair next round")
 
         # RULES Stage D: min word count >= 120 hard rule
         # Sections shorter than 120 words are "garbage" (rlhf_v3-style 143w sections)

@@ -58,17 +58,57 @@ from research.outline_from_research import generate_outline, OutlineProfile, Out
 from research.deep_investigate import investigate_section
 from research.mathfix import normalize_math  # canonical math/special-char normalization (single source of truth)
 from research.decite import clean_intrabook_citations  # Stage-F intra-book citation cleaner (single source of truth)
+from research.dedup import drop_duplicate_sentences  # Stage-F exact-duplicate sentence remover (deletion-only)
 
 # Constants shared with research layer
 try:
     from research import canonical_seeds as _canonical_seeds
-    from research.config import PRIMARY_FLOOR as _PRIMARY_FLOOR, PROVIDERS_DEFAULT as _PROVIDERS_DEFAULT
+    from research.config import (
+        PRIMARY_FLOOR as _PRIMARY_FLOOR, PROVIDERS_DEFAULT as _PROVIDERS_DEFAULT,
+        WRITER_MODEL as _WRITER_MODEL, JUDGE_MODEL as _JUDGE_MODEL, EMBED_MODEL as _EMBED_MODEL,
+    )
     _RESEARCH_AVAILABLE = True
 except ImportError:
     _canonical_seeds = None
     _PRIMARY_FLOOR = 0
     _PROVIDERS_DEFAULT = ("arxiv", "wikipedia", "ddg")
+    _WRITER_MODEL = None
+    _JUDGE_MODEL = None
+    _EMBED_MODEL = None
     _RESEARCH_AVAILABLE = False
+
+
+def _run_provenance(seed=42):
+    """Reproducibility stamp for state.json: the git commit the run executed at (+ a dirty
+    flag), the fixed Ollama seed, and each model's WEIGHTS DIGEST -- so a run is tied to the
+    exact model version, not just its name (a re-pulled `:latest` can silently change).
+    Every field degrades to None if unavailable (not a git checkout, Ollama down) -- provenance
+    is best-effort and must never fail a run. Constant for the whole run: compute once."""
+    import subprocess
+    git_sha = git_dirty = None
+    try:
+        git_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                                 capture_output=True, text=True, timeout=5).stdout.strip() or None
+        git_dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                                        capture_output=True, text=True, timeout=5).stdout.strip())
+    except Exception:
+        pass
+    digests = {}
+    try:
+        import httpx
+        from research._ollama import OLLAMA_BASE
+        for m in httpx.get(f"{OLLAMA_BASE}/api/tags", timeout=5).json().get("models", []):
+            if m.get("name"):
+                digests[m["name"]] = m.get("digest")
+    except Exception:
+        pass
+
+    def _m(name):
+        return {"name": name, "digest": digests.get(name)} if name else None
+
+    return {"git_sha": git_sha, "git_dirty": git_dirty, "seed": seed,
+            "models": {"writer": _m(_WRITER_MODEL), "judge": _m(_JUDGE_MODEL),
+                       "embed": _m(_EMBED_MODEL)}}
 
 
 # Math normalization (split glued -> balance $$ -> escape Unicode -> validate+neutralize)
@@ -221,6 +261,12 @@ def assemble_book(outline, sections, output_path):
     # so any section-level math mangling can't crash tectonic at render time.
     assembled = normalize_math(assembled)
 
+    # Stage F: drop exact-duplicate boilerplate sentences repeated across chapters (deletion-only,
+    # keeps first occurrence; code/math/headings/reference lists are never touched).
+    assembled, _n_dedup = drop_duplicate_sentences(assembled)
+    if _n_dedup:
+        print(f"[assemble] Stage-F dedup: removed {_n_dedup} exact-duplicate sentence(s)", flush=True)
+
     # RULES Stage F: heading hygiene check -- 0 orphans/dupes
     heading_re = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
     headings = [(m.start(), m.group(1), m.group(2).strip()) for m in heading_re.finditer(assembled)]
@@ -363,6 +409,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
 
     # Load existing state for resume
     state_path = run_dir / "state.json"
+    _prov = _run_provenance()  # git SHA + seed + model digests; constant for the run, compute once
     if state_path.exists():
         state = json.loads(state_path.read_text())
         sections = state.get("sections", {})
@@ -524,6 +571,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
                             "profile": tp_data,
                             "sections": sections,
                             "total_words": total_w,
+                            "provenance": _prov,
                             "protected_source_ids": list(topic_profile.protected_source_ids) if 'topic_profile' in dir() and topic_profile else [],
                             "canonical_arxiv_ids": list(topic_profile.canonical_arxiv_ids) if 'topic_profile' in dir() and topic_profile else [],
                             "run_seen_counts": run_seen_counts,
