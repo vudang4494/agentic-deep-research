@@ -86,7 +86,7 @@ Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT
 
 ⚠️ Các số `0.80 grounding`, `0.80 topic_purity`, `jaccard 0.30/0.70` trong tài liệu cũ là **ASPIRATIONAL (target), KHÔNG được enforce**. Đừng trích chúng làm hành vi thật.
 
-⚠️ **Bẫy hằng số trùng tên:** `AUTO_SUPPORT_COS` tồn tại ở CẢ `config.py` (legacy/v1) lẫn `verify.py` (bản đang chạy, giá trị KHÁC). Đường verify dùng bản LOCAL của `verify.py` — sửa `config.py` sẽ KHÔNG đổi hành vi G2. Trước khi đổi bất kỳ ngưỡng nào: `grep -rn "<TÊN_HẰNG>" research/` để biết bản nào thắng.
+✅ **Ngưỡng single-source (drift đã diệt):** mỗi ngưỡng chỉ định nghĩa MỘT chỗ — model name → `config.py`; gate threshold (`AUTO_SUPPORT_COS`, `RELEVANCE_FLOOR`, `HHEM_SUPPORT`…) → cạnh logic ở `verify.py`/`rerank.py`/`faithfulness.py`. Bất-biến này do `eval/verify_all.py` (check E/F) enforce — **chạy nó trước khi ship.**
 
 ## 6. Guardrails — tránh đi sai hướng product/process
 1. **Output goal > volume.** Đây là technical book đúng-topic, grounded, auditable — KHÔNG phải máy sinh chữ. Run 700 trang mà drift/lặp = **FAIL**. Đừng tối ưu section/word/completion trước topic purity & non-redundancy.

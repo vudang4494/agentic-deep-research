@@ -254,7 +254,7 @@ def investigate_section(
     protected_source_ids: set = None,
     # P0c: run-level seen-count map -- penalizes over-represented sources across sections
     run_seen_counts: dict = None,
-    # Rank6: primary_floor reserves N of top-8 slots for arxiv/wikipedia primary sources
+    # primary_floor reserves N of top-8 slots for arxiv/wikipedia primary sources
     primary_floor: int = 0,
     # AGENTIC evidence-pool memory: on-topic Source objects already gathered by sibling sections this
     # run. A niche section whose fresh queries return little is RESCUED by reusing these (the cosine
@@ -465,7 +465,7 @@ def investigate_section(
             protected_ids=protected_source_ids,
             seen_counts=seen_counts,   # P0c: penalize over-represented sources
             p0c_exempt_ids=_pool_rescue_ids,   # agentic: don't P0c-penalize pool-rescued siblings
-            primary_floor=primary_floor,  # Rank6: reserve arxiv/wiki slots
+            primary_floor=primary_floor,  # reserve arxiv/wiki slots
         )
 
         # P0b: prepend force-fetched canonical papers so they appear in the evidence pool.
@@ -583,7 +583,7 @@ def investigate_section(
                 )
 
         # --- Build context block ---
-        # Rank9: strip markdown headings and "(ChN.M...)" outline tags from the tail first,
+        # strip markdown headings and "(ChN.M...)" outline tags from the tail first,
         # so the next section doesn't echo a heading/title it sees in continuation context.
         ctx_parts = []
         for ps in prior_sections[-2:]:
@@ -630,7 +630,7 @@ def investigate_section(
         content, n_dropped = _notes.clean_citations(content, len(ranked))
         if n_dropped:
             print(f"  [R{round_n}] Cleaned {n_dropped} bad citations")
-        # Rank2 CITE-GUARD: a citation-shaped [N..] surviving clean_citations means the
+        # CITE-GUARD: a citation-shaped [N..] surviving clean_citations means the
         # cleaner regex has a gap -- surface it without eating legit math like [N=512].
         _resid = re.findall(r"\[\s*[Nn]\d*(?:\s*,\s*[Nn]?\d+)*\s*\]", content)
         if _resid:

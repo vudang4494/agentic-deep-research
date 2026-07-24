@@ -84,7 +84,7 @@ SEED_MAP = {
     "beam search": "1409.3215",
 }
 
-# Rank8: canonical attribution facts for the most-cited papers, keyed by the
+# canonical attribution facts for the most-cited papers, keyed by the
 # alias the writer is likely to name. Used to flag confidently-wrong author/year
 # attributions that citation-grounding (support-by-snippet) cannot catch -- e.g.
 # bookv6 3.2 misattributed Chinchilla to "Muennighoff et al. (2023)"

@@ -94,7 +94,7 @@ def _sanitize_section_content(content: str, title_set=None) -> str:
     cleaned = cleaned.replace("Chapter:", "")
     cleaned = cleaned.replace("Section:", "")
 
-    # Rank9: content-bleed. A leading line carrying an orphan "(ChN.M...)" outline
+    # content-bleed. A leading line carrying an orphan "(ChN.M...)" outline
     # tag is a prior section's disambiguated title that leaked into this body.
     # Drop that whole leading line, then strip any residual inline tag anywhere.
     cleaned = re.sub(
@@ -107,7 +107,7 @@ def _sanitize_section_content(content: str, title_set=None) -> str:
     cleaned = re.sub(r"^###\s+(.+)$", r"**\1**", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
-    # Rank9: normalize display math before returning (tectonic safety net)
+    # normalize display math before returning (tectonic safety net)
     cleaned = normalize_math(cleaned)
     return cleaned.strip()
 
@@ -217,7 +217,7 @@ def assemble_book(outline, sections, output_path):
         lines.extend(sec_lines)
     assembled = "\n".join(lines)
 
-    # Rank9/10: final math normalization safety net across the whole assembled doc
+    # final math normalization safety net across the whole assembled doc
     # so any section-level math mangling can't crash tectonic at render time.
     assembled = normalize_math(assembled)
 
@@ -269,7 +269,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
     print("=" * 60)
     t0 = time.time()
 
-    # Rank13: log effective providers (after key/session-disable filtering)
+    # log effective providers (after key/session-disable filtering)
     if _RESEARCH_AVAILABLE:
         try:
             from research import search as _search_mod
@@ -425,7 +425,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
             print("\n  [" + str(done) + "/" + str(all_sections) + "] " + key + ": " + pp_t)
             prior_concepts = list(discovered.keys())
 
-            # Rank5: canonical seed injection -- resolve canonical arxiv IDs from section text
+            # canonical seed injection -- resolve canonical arxiv IDs from section text
             # so foundational papers (Vaswani, BERT, GPT-3, ...) are injected even when search
             # queries don't surface them. Seeds bypass the cosine gate (protected by ID).
             protected_ids = set(getattr(topic_profile, "protected_source_ids", []) or [])
@@ -436,7 +436,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
                     print(f"  [SEED] resolved {len(seed_ids)} canonical seeds: {seed_ids}")
                     protected_ids = protected_ids | set(seed_ids)
 
-            # Rank13: primary_floor ensures arxiv/wikipedia fill ≥N of top-8 slots
+            # primary_floor ensures arxiv/wikipedia fill ≥N of top-8 slots
             primary_floor = _PRIMARY_FLOOR if _RESEARCH_AVAILABLE else 0
 
             def _invoke(_max_rounds, _providers):
