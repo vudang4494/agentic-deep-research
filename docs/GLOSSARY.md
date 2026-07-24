@@ -1,111 +1,117 @@
-# Glossary -- Thuật ngữ hệ thống
+# Glossary — Thuật ngữ hệ thống
 
-> **Mục đích:** Định nghĩa chuẩn tất cả thuật ngữ. Dùng cho mọi file trong project.
+> **Mục đích:** định nghĩa chuẩn thuật ngữ, dùng chung cho mọi file trong project. Đọc file này TRƯỚC.
+> **File này định nghĩa TỪ, không giữ NGƯỠNG.** Mọi con số → `docs/RULES.md`, và cuối cùng là **code**. Không changelog, không số đo một lần, không số dòng code.
 
 ---
 
 ## A. Kiến trúc Pipeline
 
 | Term | Viết tắt | Định nghĩa |
-|------|-----------|-------------|
-| **Deep Investigation** | DI | Giai đoạn 2: với mỗi section, thực hiện research (tìm nguồn) -> write (viết) -> verify (kiểm tra) |
-| **Discovery** | | Giai đoạn 0: phân tích topic, tạo TopicProfile |
-| **Outline Generation** | | Giai đoạn 1: tạo cấu trúc chương/phần từ evidence |
-| **Topic Profile** | TP | Data structure chứa: title, description, canonical papers, key concepts, search queries |
-| **Outline Profile** | OP | Data structure chứa: title, chapters[], sections[] |
-| **Chapter** | CH | Một chương trong sách |
-| **Section** | SEC | Một phần trong chương, ví dụ "1.1 Introduction" |
-| **State File** | | `state.json` -- lưu trạng thái run: sections đã viết, tổng words, seen_counts |
+|------|----------|------------|
+| **Discovery** | DSC | Stage 0: phân tích topic → `TopicProfile` |
+| **Outline Generation** | OUT | Stage 1: tạo cấu trúc chương/section **TỪ evidence** (không pre-template) |
+| **Deep Investigation** | DI | Stage 2: mỗi section chạy vòng lặp research → rank → gate → write → verify |
+| **Topic Profile** | TP | Struct: title, description, canonical papers, canonical terms, must-cover, out-of-scope |
+| **Outline Profile** | OP | Struct: title, `chapters[]`, `sections[]` |
+| **Chapter / Section** | CH / SEC | Chương · phần trong chương (vd "1.1 Introduction") |
+| **State File** | | `output/runs/<name>/state.json` — section đã viết, tổng words, `seen_counts`. Là **cơ chế resume**: re-run cùng `--out-name` sẽ bỏ qua section đã có |
+| **Assemble** | | Stage 3: gộp section thành `book.md` + hygiene (math, heading, `decite`) |
+| **Render** | | Stage 4 (`--render`): `book.md` → PDF/HTML qua pandoc + tectonic |
+| **Smoke** | | Chế độ **MẶC ĐỊNH**: cắt outline còn vài chương để chạy nhanh. Muốn sách đầy đủ phải truyền `--no-smoke` |
 
 ## B. Kiểm soát chất lượng
 
 | Term | Định nghĩa |
-|------|-------------|
-| **Hard Block** | Khi kiểm tra fail, DỪNG và báo lỗi. Không viết section. Đối lập với Soft Block. |
-| **Soft Block** | Khi kiểm tra fail, vẫn tiếp tục nhưng đánh dấu chất lượng giảm. |
-| **Orchestration-layer improvement (doctrine)** | Cải thiện chất lượng ở tầng **orchestration/inference** (retrieval/verify/revise-loop/prompt/evidence-selection) — **KHÔNG fine-tune model, KHÔNG build dataset** (giữ topic-agnostic, prompt-robust, auditable). Bottleneck writer-grounding → verify-revise loop. Xem `CLAUDE.md mục 2`. |
-| **Domain Relevance Gate (P0a)** | Kiểm tra evidence pool đúng domain trước khi viết, qua `notes.check_evidence_domain()` = keyword-overlap + optional gemma judge (KHÔNG phải LLM-judge thuần). Threshold THẬT ≈ 0.40 (`deep_investigate.py:524`), KHÔNG phải 0.60. Accept-topic (writer) = 0.50. Ngưỡng chuẩn: RULES.md |
-| **Evidence Gate (P0a/B)** | Trước writer: (1) pool không rỗng (else HARD BLOCK); (2) domain-relevance ≥ ev_threshold≈0.40. KHÔNG có gate "đủ terms" riêng. |
-| **Grounding Score** | Điểm HHEM v2 NLI (0-1). **G3 = log-only/advisory** (P0 2026-06-22: đã bỏ khỏi gate): strict-NLI ~0.05–0.10 trên prose synthesized → KHÔNG phải metric, không hard-block. (g=1.0 v36 là HHEM degenerate cũ, đã fix.) |
-| **Topic Relevance Score** | Điểm content đúng chủ đề (0-1). **G4 blend** 0.6·`answer_relevance` (gemma LOCAL) + 0.4·term-overlap (`verify.py:401-411`). **P0: ENFORCED** — điều kiện `gate_ok` (clean-accept) + StageE chặn best-topic<0.50. |
-| **Citation Count** | Số lần nguồn được trích dẫn trong text. Zero citation = section không có evidence |
-| **Verify signals (G2/G3/G4) — POST-P0+P0-2b (2026-06-23)** | Gate cứng SỐNG = **P0a pre-writer + G2 cite_prec≥0.45**. **G2 cite_precision** = `verify_section` per-`[N]` (gemma) **GATE SỐNG** → cite_precision **đo thật** (KHÔNG default 1.0). **P0-2b:** judge prompt **soften** (paraphrase=supports, contradicts/unrelated giữ strict) → prose faithful đo ~0.48 ≥0.45 → **ACCEPT (`quality="ok"`)**; weak floor → degraded. Discrimination `bench_cite_discrimination.py`: GOOD 0.72 vs BAD 0.18/0.20. **G3 grounding** = log-only/advisory. **G4 topic** = ENFORCED. → `docs/plan.md` mục Upgrade (kế = P1). |
+|------|------------|
+| **Hard Block** | Check fail → DỪNG, không viết section. Đối lập **Soft Block** (vẫn ship nhưng hạ nhãn chất lượng) |
+| **Quality label** | Giá trị trường `quality` trong `state.json`: **`ok`** = qua sạch mọi gate sống · **`degraded`** = có nội dung nhưng trượt một gate mềm · **`BLOCKED`** = bị gate cứng chặn, **không vào book** (bỏ cả heading). ⚠️ Nhãn này **KHÔNG so sánh được xuyên phiên bản gate** |
+| **Orchestration-layer improvement (doctrine)** | Cải thiện chất lượng ở tầng **orchestration/inference** (retrieval · verify · revise-loop · prompt · evidence-selection) — **KHÔNG fine-tune model, KHÔNG build dataset** (giữ topic-agnostic, prompt-robust, auditable). Xem `CLAUDE.md §2` |
+| **P0a — Domain Relevance Gate** | Kiểm evidence pool có đúng domain **TRƯỚC khi viết**, qua `notes.check_evidence_domain()` = keyword-overlap + gemma judge (không phải LLM-judge thuần). **Gate cứng, PRE-writer.** Ngưỡng → `RULES.md` |
+| **P0b — Canonical Injection** | Ép paper nền tảng của topic vào pool ngay từ Discovery (`--canonical-arxiv-ids`, `canonical_seeds.py`): force-fetch + đánh dấu protected |
+| **P0c — Seen Penalty** | Phạt nguồn đã dùng ở nhiều section trước (trong RRF) để một paper không dominate cả sách. Canonical + pool-rescued được **EXEMPT** |
+| **Protected source** | Nguồn canonical: **bypass** cosine prefilter + **exempt** khỏi P0c. Phá exemption này → canonical recall sụp về 0 |
+| **Evidence Gate** | Trước writer: (1) pool không rỗng, else HARD BLOCK; (2) domain-relevance ≥ `ev_threshold` (P0a). KHÔNG có gate "đủ terms" riêng |
+| **Evidence-pool rescue** | Khi sau prefilter còn quá ít nguồn on-topic → mượn nguồn của **section anh em** trong cùng run (vẫn qua prefilter), và **exempt P0c**. Chống block vì thiếu retrieval chứ không phải vì sai topic |
+| **StageD / StageE** | Chốt kiểm cuối vòng lặp: **StageD** = word-count/cross-ref tối thiểu · **StageE** = HARD BLOCK khi best-topic dưới ngưỡng sau khi hết round (độc lập grounding) |
+| **ReAct re-dispatch** | Section bị block được **retry MỘT lần** với nhiều round hơn + full provider set, trước khi stub `[BLOCKED]`. → block-rate trong `state.json` là số **sau** retry |
+| **Grounding Score** | Điểm HHEM v2 (NLI). **G3 = log-only/advisory**, đã bỏ khỏi gate: strict-NLI under-score prose tổng hợp → **không phải metric chất lượng** |
+| **Topic Relevance Score** | Mức đúng chủ đề của nội dung. **G4 = blend** `answer_relevance` (gemma LOCAL) + term-overlap, có floor bảo vệ khi term đủ và không drift. **ENFORCED** |
+| **Citation Precision** | **G2**: tỉ lệ marker `[N]` mà evidence tương ứng thật sự support claim, chấm per-`[N]` bằng gemma. `supports` tính cả **paraphrase trung thực**; `contradicts`/`unrelated` giữ strict. **Gate sống** |
+| **Citation Count** | Số lần nguồn được trích trong text. Zero citation = section không có evidence |
+| **Cross-reference** | Câu dẫn chiếu section trước (đếm bằng regex). Yêu cầu tăng theo số section đã viết |
+| **Verifier ≠ Writer** | Bất biến chống self-preference: grounding = HHEM · topic/citation = gemma · writer = Qwen. Không để writer tự chấm văn mình |
+| **Decite** | Stage-F cleaner: writer hay name-drop **TITLE của section anh em** như thể paper ngoài → gỡ deterministic, chỉ xoá khi khớp đúng một section title, giữ nguyên `[N]`/cite ngoài |
+| **Claim-aware excerpt** | Chọn đoạn trích của nguồn theo **argmax cosine với section prompt** (window chồng lấp) thay vì cắt phần đầu tài liệu — phần đầu thường không chứa fact cần cite |
+| **Matrix pattern** | Anti-pattern: outline sinh theo tích `chapters × concepts` → hàng loạt section `{base}: {aspect}` gần trùng nhau. Bị `enforce_outline_structure()` collapse |
 
-## C. Retrieval (Tìm kiếm nguồn)
+## C. Retrieval
 
 | Term | Viết tắt | Định nghĩa |
-|------|-----------|-------------|
-| **Source** | | Một nguồn tìm được: có id, title, url, excerpt |
-| **Canonical Paper** | | Paper nền tảng bắt buộc phải có (ví dụ "Attention Is All You Need") |
-| **BM25** | | Sparse retrieval: tìm theo keyword matching. Không cần embedding |
-| **Cosine Similarity** | | Dense retrieval: tìm theo embedding vector similarity |
-| **Reciprocal Rank Fusion** | RRF | Gộp nhiều rankers (BM25 + Cosine) bằng công thức 1/(k+rank) |
-| **Reranker / Cross-Encoder** | RRK | Mô hình re-rank kết quả retrieval. Model: BAAI/bge-reranker-v2-m3 |
-| **Embedding Model** | | **UNIFIED** `bge-m3:latest` (#3): retrieval (notes.rank/prefilter RRF), query_router, và verify-side đều dùng cùng 1 model — KHÔNG còn nomic runtime path. `config.py:34`, `notes.py:111`, `query_router.py:210`, `embeddings.py:8`, `verify.py:35`. (Trước split vì nomic cần prefix search_query/document mà code không truyền → asymmetric; 0 ref nomic sống, chỉ comment "was nomic".) |
-| **Primary Source** | | arxiv.org hoặc wikipedia -- nguồn đáng tin cậy |
-| **Secondary Source** | | Blog, medium, substack -- nguồn phụ |
-| **Grey Domain** | | Domain có thể kém tin cậy (đã được whitelist) |
+|------|----------|------------|
+| **Source** | | Một nguồn: id, title, url, excerpt |
+| **Canonical Paper** | | Paper nền tảng bắt buộc phải có của topic (vd "Attention Is All You Need") |
+| **Provider** | | Backend tìm kiếm: arxiv · wikipedia · tavily · brave · ddg. Provider thiếu API key = **no-op an toàn**, không lỗi |
+| **BM25** | | Sparse retrieval: khớp keyword, không cần embedding |
+| **Cosine Similarity** | | Dense retrieval: khớp theo embedding vector |
+| **Reciprocal Rank Fusion** | RRF | Gộp nhiều ranker (BM25 + cosine) bằng `1/(k+rank)` |
+| **Reranker / Cross-Encoder** | RRK | Re-rank kết quả retrieval — `BAAI/bge-reranker-v2-m3` (transformers, không qua Ollama) |
+| **Prefilter** | | Chỗ **hard-drop duy nhất** của pool: loại nguồn dưới ngưỡng cosine (grey-domain khắt khe hơn). Protected source bypass |
+| **Embedding Model** | | **UNIFIED** `bge-m3:latest` mọi path: retrieval (RRF/prefilter), query_router, verify-side |
+| **Primary / Secondary Source** | | arxiv, wikipedia = primary · blog/medium/substack = secondary |
+| **Grey Domain** | | Domain độ tin thấp hơn, đã whitelist — áp ngưỡng prefilter cao hơn |
 
-## D. Mô hình AI
+## D. Mô hình (tất cả LOCAL)
 
-| Term | Model | Vai trò |
-|------|-------|---------|
-| **Writer** | `batiai/qwen3.6-35b:iq3` | Viết nội dung section |
-| **Query Generator** | QGN | Sinh search queries từ section title |
-| **Judge / Verifier** | | Grounding = HHEM (model). Topic relevance = G4 blend heuristic + `answer_relevance` (gemma LOCAL). Citation integrity = `verify_section` G2 (gemma LOCAL). P0a domain = check_evidence_domain (gemma). |
-| **Discovery Model** | | Phân tích topic, tạo TopicProfile |
-| **Outline Model** | | Tạo outline từ evidence |
+| Vai trò | Model |
+|---------|-------|
+| **Discovery / Outline / Query-Gen / Judge** | `gemma4:e4b` |
+| **Writer** | `batiai/qwen3.6-35b:iq3` |
+| **Embed** | `bge-m3:latest` |
+| **Rerank** | `BAAI/bge-reranker-v2-m3` |
+| **Grounding** | `vectara/hallucination_evaluation_model` (HHEM v2) |
 
-## E. Các lỗi đã biết
+> **LOCAL-ONLY:** mọi model inference chạy cục bộ (Ollama + transformers). **KHÔNG gọi Claude/OpenAI/external API lúc runtime.** Search provider ngoài (tavily/brave/ddg) KHÔNG vi phạm — LOCAL-only nói về *model inference*.
+
+## E. Lỗi đã biết
 
 | Term | Định nghĩa | Root cause |
-|------|-------------|------------|
-| **Domain Mismatch** | Evidence tìm từ domain sai (ví dụ: RAG paper cho RLHF section) | Query generator gửi nhầm archetype |
-| **Evidence Domination** | Một paper xuất hiện trong >50% sections | Không có penalty cho nguồn trùng lặp |
-| **Canonical Miss** | Paper nền tảng không được retrieve | Search API ưu tiên paper mới |
-| **Zero Citation** | Section không trích dẫn nguồn nào | Evidence rỗng hoặc writer không cite |
+|------|------------|------------|
+| **Domain Mismatch** | Evidence lấy từ domain sai (vd paper RAG cho section RLHF) | Query generator gửi nhầm archetype |
+| **Evidence Domination** | Một paper xuất hiện ở >50% section | Thiếu penalty cho nguồn trùng (→ P0c) |
+| **Canonical Miss** | Paper nền tảng không retrieve được | Search API ưu tiên paper mới (→ P0b) |
+| **Zero Citation** | Section không trích nguồn nào | Evidence rỗng hoặc writer không cite |
+| **Hollow heading** | Heading có trong book nhưng không có nội dung | Assemble duyệt full outline thay vì chỉ section có trong `state.json` (đã fix) |
 
 ## F. Ký hiệu Logging
 
 | Ký hiệu | Viết đầy | Ý nghĩa |
-|---------|-----------|----------|
+|---------|----------|---------|
+| `DSC` | Discovery | Phân tích topic |
+| `OUT` | Outline | Sinh cấu trúc sách |
 | `RSR` | Research | Thu thập nguồn |
 | `QGN` | Query Gen | Sinh truy vấn |
+| `RRK` / `RRF` | Rerank / Rank Fusion | Re-rank · gộp BM25+cosine |
 | `WRT` | Write | Viết section |
-| `VFY` | Verify | Kiểm tra grounding |
-| `RVW` | Review | Đánh giá chất lượng |
-| `RRK` | Rerank | Re-rank kết quả retrieval |
-| `RRF` | Rank Fusion | Gộp BM25 + Cosine |
+| `VFY` | Verify | Kiểm grounding/topic/citation |
 | `DI` | Deep Investigation | Toàn bộ stage 2 |
 
-## G. Experiment Labels
+## G. Nhãn thực nghiệm
 
 | Label | Ý nghĩa |
-|-------|----------|
-| **Experiment A** | Benchmark 7 topics trước khi có fixes |
-| **Experiment B** | Benchmark 7 topics sau khi có P0a/b/c fixes |
-| **Smoke Test** | Test nhanh 1 section để verify fixes hoạt động |
-| **Run** | Một lần chạy pipeline trên một topic |
-| **Eval artifact** (BAER / `product_quality_verifiers.py`) | Công cụ **ĐO** chất lượng run đã xong (`eval/*`) — eval-only, dùng để chấm, KHÔNG phải training data. |
+|-------|---------|
+| **Run** | Một lần chạy pipeline trên một topic (một run-dir) |
+| **Smoke test** | Chạy rút gọn để verify fix hoạt động, không phải để đánh giá chất lượng |
+| **Eval artifact** (BAER · `eval/product_quality_verifiers.py`) | Công cụ **ĐO** chất lượng run đã xong — **eval-only, không chạy trong pipeline**, và KHÔNG phải training data |
 
-## H. Acronyms thường gặp
+## H. Acronyms
 
 | Acronym | Giải nghĩa |
-|---------|-------------|
-| RRF | Reciprocal Rank Fusion |
-| RRK | Reranker / Cross-encoder rerank |
-| LLM | Large Language Model |
-| QGN | Query Generator |
-| VFY | Verifier |
-| WRT | Writer |
-| DI | Deep Investigation |
-| TP | Topic Profile |
-| OP | Outline Profile |
-| arxiv | arxiv.org -- kho paper học thuật |
-| wiki | Wikipedia |
-| ddg | DuckDuckGo web search |
-| CoT | Chain-of-Thought |
-| DPO | Direct Preference Optimization |
-| RLHF | Reinforcement Learning from Human Feedback |
-| RoPE | Rotary Position Embedding |
-| HHEM | Hallucination Evaluation Model |
+|---------|------------|
+| RRF · RRK | Reciprocal Rank Fusion · Reranker |
+| QGN · WRT · VFY · DI | Query Generator · Writer · Verifier · Deep Investigation |
+| TP · OP | Topic Profile · Outline Profile |
+| HHEM | Hallucination Evaluation Model (Vectara) |
+| NLI | Natural Language Inference |
+| arxiv · wiki · ddg | arxiv.org · Wikipedia · DuckDuckGo |
+| CoT · DPO · RLHF · RoPE | Chain-of-Thought · Direct Preference Optimization · RL from Human Feedback · Rotary Position Embedding |
