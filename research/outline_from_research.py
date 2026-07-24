@@ -9,13 +9,13 @@ Output: OutlineProfile = {
     coverage_gaps: ["concept X not yet covered"],
   }
 """
-import httpx, json, re
+import json, re
 from dataclasses import dataclass, field
 from typing import List
 
 from .config import OUTLINE_MODEL, EMBED_MODEL
+from ._ollama import chat as _ollama_chat
 
-OLLAMA_BASE = "http://localhost:11434"
 TIMEOUT = 300.0
 _GENERIC_CHAPTER_RE = re.compile(r"^(Part|Chapter|Section)\s+\d+\s*$", re.IGNORECASE)
 
@@ -34,25 +34,6 @@ class OutlineProfile:
     evidence_map: List[dict] = field(default_factory=list)
     outline_audit: dict = field(default_factory=dict)
     _raw: str = ""
-
-
-def _ollama_chat(model: str, messages: list, temperature: float = 0.4,
-                 num_predict: int = 4000, timeout: float = TIMEOUT) -> str:
-    payload = {
-        "model": model,
-        "stream": False,
-        "think": False,
-        "messages": messages,
-        "options": {"temperature": temperature, "num_predict": num_predict},
-    }
-    with httpx.Client(timeout=timeout) as c:
-        r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-    content = (data.get("message") or {}).get("content", "").strip()
-    if not content:
-        content = (data.get("message") or {}).get("thinking", "").strip()
-    return content
 
 
 def build_evidence_map(topic_profile, sources: list) -> List[dict]:

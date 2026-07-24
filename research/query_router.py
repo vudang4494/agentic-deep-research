@@ -19,8 +19,7 @@ import httpx
 from .embeddings import embed as _embed, cosine as _cosine
 from .types import Query
 from .config import QUERY_GEN_MODEL, EMBED_MODEL
-
-OLLAMA_BASE = "http://localhost:11434"
+from ._ollama import OLLAMA_BASE
 DEFAULT_MODEL = QUERY_GEN_MODEL
 DEFAULT_TIMEOUT = 90.0
 

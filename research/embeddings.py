@@ -5,8 +5,8 @@ from typing import List
 import httpx
 
 from .config import EMBED_MODEL
+from ._ollama import OLLAMA_BASE
 
-OLLAMA_BASE = "http://localhost:11434"
 DEFAULT_MODEL = EMBED_MODEL
 TIMEOUT = 60.0
 
