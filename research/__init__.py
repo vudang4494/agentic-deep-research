@@ -18,13 +18,9 @@ from .types import Source, Query
 from .config import (
     PROVIDERS_DEFAULT,
     TOP_K_DEFAULT,
-    TOP_K_RETRIEVE,
-    TOP_K_FINAL,
     PRIMARY_FLOOR,
     FULL_TEXT_TOP_N,
     FULL_TEXT_MAX_WORDS,
-    RELEVANCE_FLOOR,
-    HHEM_SUPPORT,
     GROUND_UPPER,
     GROUND_LOWER,
     QUERY_GEN_MODEL,
@@ -35,8 +31,6 @@ from .config import (
     EMBED_MODEL,
     MIN_GROUNDING,
     MAX_RESEARCH_ROUNDS,
-    AUTO_SUPPORT_COS,
-    AUTO_UNRELATED_COS,
 )
 from . import (
     search, query_gen, query_router, notes, embeddings,
@@ -59,13 +53,10 @@ __all__ = [
     "rerank", "faithfulness",
     "VFY_V2_AVAILABLE",
     "PROVIDERS_DEFAULT",
-    "TOP_K_DEFAULT", "TOP_K_RETRIEVE", "TOP_K_FINAL",
+    "TOP_K_DEFAULT",
     "FULL_TEXT_TOP_N", "FULL_TEXT_MAX_WORDS",
     "PRIMARY_FLOOR",
-    "RELEVANCE_FLOOR",
-    "HHEM_SUPPORT",
     "GROUND_UPPER", "GROUND_LOWER",
     "QUERY_GEN_MODEL", "JUDGE_MODEL", "DISCOVERY_MODEL", "OUTLINE_MODEL", "WRITER_MODEL", "EMBED_MODEL",
     "MIN_GROUNDING", "MAX_RESEARCH_ROUNDS",
-    "AUTO_SUPPORT_COS", "AUTO_UNRELATED_COS",
 ]

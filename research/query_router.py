@@ -18,7 +18,7 @@ import httpx
 
 from .embeddings import embed as _embed, cosine as _cosine
 from .types import Query
-from .config import QUERY_GEN_MODEL
+from .config import QUERY_GEN_MODEL, EMBED_MODEL
 
 OLLAMA_BASE = "http://localhost:11434"
 DEFAULT_MODEL = QUERY_GEN_MODEL
@@ -207,7 +207,7 @@ _QUERY_DECOMPOSE_SYS = (
 _JSON_STR_ARRAY_RE = re.compile(r'\[\s*(?:"[^"]+"\s*,?\s*)+\]', re.DOTALL)
 _THINK_RE = re.compile(r"<THINK>.*?</THINK>", re.DOTALL | re.IGNORECASE)
 _JSON_ARRAY_RE = re.compile(r"\[\s*(?:\{[^\[\]]*\}\s*,?\s*)+\]", re.DOTALL)
-_EMBED_MODEL = "bge-m3:latest"  # #3 unify (was nomic, used without required prefix)
+_EMBED_MODEL = EMBED_MODEL
 _LOCK = threading.Lock()
 
 

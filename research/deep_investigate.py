@@ -33,7 +33,7 @@ _project_root = Path(__file__).parent.parent
 if str(_project_root) not in _sys.path:
     _sys.path.insert(0, str(_project_root))
 
-from .config import PROVIDERS_DEFAULT  # single source of truth for the default provider set (incl tavily)
+from .config import PROVIDERS_DEFAULT, EMBED_MODEL, WRITER_MODEL, JUDGE_MODEL
 
 
 @dataclass
@@ -238,10 +238,10 @@ def investigate_section(
     prior_sections: List[dict] = None,  # [{title, content}] for cross-ref
     prior_concepts: List[str] = None,     # concepts already covered elsewhere
     providers: tuple = PROVIDERS_DEFAULT,  # incl tavily; was ("arxiv","wikipedia","ddg") -> silently dropped tavily
-    embed_model: str = "bge-m3:latest",  # #3 unify retrieval embed with verify-side
+    embed_model: str = EMBED_MODEL,
     reranker_model: str = "BAAI/bge-reranker-v2-m3",
-    writer_model: str = "batiai/qwen3.6-35b:iq3",  # WRT: stable writer on this machine
-    judge_model: str = "gemma4:e4b",  # Research/Topic gate: stable fast model on 24 GB
+    writer_model: str = WRITER_MODEL,
+    judge_model: str = JUDGE_MODEL,
     max_rounds: int = 3,
     min_grounding: float = 0.70,
     min_topic_relevance: float = 0.50,
@@ -748,7 +748,7 @@ def investigate_section(
                 from .embeddings import embed as _dd_embed, cosine as _dd_cos
                 _dd_prior = prior_sections[-12:]
                 _dd_txt = [content[:1500]] + [(ps.get("content", "") or "")[:1500] for ps in _dd_prior]
-                _dd_vec = _dd_embed(_dd_txt, model="bge-m3:latest")
+                _dd_vec = _dd_embed(_dd_txt, model=EMBED_MODEL)
                 if _dd_vec and len(_dd_vec) == len(_dd_txt):
                     for _k in range(len(_dd_prior)):
                         _c = _dd_cos(_dd_vec[0], _dd_vec[_k + 1])
@@ -919,7 +919,7 @@ def investigate_section(
             from .embeddings import embed as _g6_embed, cosine as _g6_cos
             _g6_prior = prior_sections[-12:]
             _g6_vecs = _g6_embed([best_content[:1500]] + [(ps.get("content", "") or "")[:1500] for ps in _g6_prior],
-                                 model="bge-m3:latest")
+                                 model=EMBED_MODEL)
             if _g6_vecs and len(_g6_vecs) == len(_g6_prior) + 1:
                 _sims = [(_g6_cos(_g6_vecs[0], _g6_vecs[k + 1]), k) for k in range(len(_g6_prior))]
                 _mx, _ki = max(_sims, key=lambda x: x[0]) if _sims else (0.0, -1)
@@ -928,7 +928,7 @@ def investigate_section(
                     my_paras = [p for p in re.split(r"\n\s*\n", best_content) if p.strip()]
                     pr_paras = [p for p in re.split(r"\n\s*\n", (_g6_prior[_ki].get("content", "") or "")) if p.strip()][:40]
                     if len(my_paras) > 1 and pr_paras:
-                        pv = _g6_embed([p[:600] for p in my_paras] + [p[:600] for p in pr_paras], model="bge-m3:latest")
+                        pv = _g6_embed([p[:600] for p in my_paras] + [p[:600] for p in pr_paras], model=EMBED_MODEL)
                         if pv and len(pv) == len(my_paras) + len(pr_paras):
                             mvec, pvec = pv[:len(my_paras)], pv[len(my_paras):]
                             kept, dropped = [], 0

@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from .embeddings import embed, cosine
 from .fetch import fetch_full_text
 from .types import Source
+from .config import EMBED_MODEL, JUDGE_MODEL
 
 
 def dedup(sources: List[Source]) -> List[Source]:
@@ -108,7 +109,7 @@ def _is_noisy_domain(url: str) -> bool:
 def prefilter(sources: List[Source], section_prompt: str,
               min_relevance: float = 0.48,   # Rank7: 0.45->0.48 trims the weakest off-topic tail
               noisy_min_relevance: float = 0.65,
-              embed_model: str = "bge-m3:latest",
+              embed_model: str = EMBED_MODEL,
               protected_ids: set = None) -> List[Source]:
     """Drop obviously off-topic sources BEFORE the main rank().
 
@@ -203,7 +204,7 @@ def _apply_primary_quota(scored: List[Source], top_k: int, primary_floor: int,
 
 
 def rank_rrf(sources: List[Source], section_prompt: str, top_k: int = 20,
-              embed_model: str = "bge-m3:latest",
+              embed_model: str = EMBED_MODEL,
               rrf_k: int = 60,
               primary_floor: int = 0,
               protected_ids: set = None,
@@ -369,7 +370,7 @@ def _best_passage(body: str, query: str, max_words: int, embed_model: str) -> st
 
 def enrich_top_sources(sources: List[Source], top_n: int = 2,
                        max_words_per: int = 350, section_prompt: str = None,
-                       embed_model: str = "bge-m3:latest") -> List[Source]:
+                       embed_model: str = EMBED_MODEL) -> List[Source]:
     """Fetch full text for the top-N highest-relevance sources and replace their
     short search excerpt with a longer extracted body (up to max_words_per).
 
@@ -535,7 +536,7 @@ def check_evidence_domain(
     section_goal: str,
     must_cover_terms: List[str],
     avoid_terms: List[str],
-    model: str = "gemma4:e4b",
+    model: str = JUDGE_MODEL,
 ) -> dict:
     """Gate: does the evidence pool match the section's domain?
 

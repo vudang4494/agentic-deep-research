@@ -23,11 +23,11 @@ import httpx
 from . import search as _search
 from .query_gen import _strip_think
 from .types import Query
+from .config import WRITER_MODEL, EMBED_MODEL
 
 OLLAMA_BASE = "http://localhost:11434"
-DEFAULT_PLANNER_MODEL = "batiai/qwen3.6-35b:iq3"  # MoE 35B / 3B active, ~15 tok/s on M4
-# qwen35:9b removed -- not available in this Ollama install.
-# If qwen3.6-35b fails (OOM, timeout), planner falls back to hardcoded outline.
+DEFAULT_PLANNER_MODEL = WRITER_MODEL
+# If the planner model fails (OOM, timeout), planner falls back to a hardcoded outline.
 DEFAULT_TIMEOUT = 480.0
 
 DEFAULT_N_CHAPTERS = 12
@@ -367,7 +367,7 @@ def _self_correct(outline: List[dict]) -> List[dict]:
         from .embeddings import embed, cosine  # local import: planner runs without it on Ollama failures
         all_pps = [(ch["n"], pp["p"], pp) for ch in outline for pp in ch["passes"]]
         titles = [pp["t"] for _, _, pp in all_pps]
-        vecs = embed(titles, model="bge-m3:latest") if len(titles) > 1 else []
+        vecs = embed(titles, model=EMBED_MODEL) if len(titles) > 1 else []
         if len(vecs) == len(titles):
             NEAR_DUP_THRESHOLD = 0.85
             for i in range(1, len(vecs)):
