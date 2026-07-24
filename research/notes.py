@@ -28,7 +28,7 @@ def dedup(sources: List[Source]) -> List[Source]:
 # Used as the sparse arm in RRF fusion alongside dense cosine.
 
 def _tokenize(text: str) -> List[str]:
-    # Rank6: math is NOISE for the sparse arm. The old tokenizer turned `\frac{a}{b}` into
+    # math is NOISE for the sparse arm. The old tokenizer turned `\frac{a}{b}` into
     # ['frac','a','b'] and LaTeX control words (frac/sqrt/beta/sum/mathrm...) into high-frequency
     # junk terms shared by EVERY formula-heavy section -> inflated BM25 similarity -> false
     # near-duplicates and wrong RRF fusion. Strip $...$/$$...$$ spans + LaTeX commands BEFORE
@@ -107,7 +107,7 @@ def _is_noisy_domain(url: str) -> bool:
 
 
 def prefilter(sources: List[Source], section_prompt: str,
-              min_relevance: float = 0.48,   # Rank7: 0.45->0.48 trims the weakest off-topic tail
+              min_relevance: float = 0.48,   # 0.45->0.48 trims the weakest off-topic tail
               noisy_min_relevance: float = 0.65,
               embed_model: str = EMBED_MODEL,
               protected_ids: set = None) -> List[Source]:
@@ -146,7 +146,7 @@ def prefilter(sources: List[Source], section_prompt: str,
     for s, v in zip(sources, vectors[1:]):
         rel = cosine(qv, v)
         s.relevance = rel  # cache for rank() to reuse
-        # Rank5: canonical seeds bypass the cosine gate -- they are known-good
+        # canonical seeds bypass the cosine gate -- they are known-good
         # primary sources injected on purpose, kept even if the descriptive
         # section prompt embeds at a lower cosine than the paper's abstract.
         if s.id in protected_ids:
