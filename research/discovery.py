@@ -15,11 +15,11 @@ The researcher:
 Why this matters: the outline depends on what you discover, not what you assumed.
 """
 from .config import DISCOVERY_MODEL
-import httpx, json, re, time
-from dataclasses import dataclass, field, asdict
+from ._ollama import chat as _ollama_chat
+import json, re, time
+from dataclasses import dataclass, field
 from typing import Dict, List
 
-OLLAMA_BASE = "http://localhost:11434"
 TIMEOUT = 300.0
 
 # R7: Reject wrapper/redirect URLs in canonical papers
@@ -76,28 +76,6 @@ class TopicProfile:
     protected_source_ids: List[str] = field(default_factory=list)
     # Raw synthesis text kept for debugging
     _synthesis: str = ""
-
-
-def _ollama_chat(model: str, messages: list, temperature: float = 0.3,
-                 num_predict: int = 2000, timeout: float = TIMEOUT) -> str:
-    payload = {
-        "model": model,
-        "stream": False,
-        "think": False,
-        "messages": messages,
-        "options": {
-            "temperature": temperature,
-            "num_predict": num_predict,
-        },
-    }
-    with httpx.Client(timeout=timeout) as c:
-        r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-    content = (data.get("message") or {}).get("content", "").strip()
-    if not content:
-        content = (data.get("message") or {}).get("thinking", "").strip()
-    return content
 
 
 def _scope_queries(topic: str) -> Dict[str, List[str]]:

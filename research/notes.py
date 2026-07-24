@@ -8,6 +8,7 @@ from .embeddings import embed, cosine
 from .fetch import fetch_full_text
 from .types import Source
 from .config import EMBED_MODEL, JUDGE_MODEL
+from ._ollama import OLLAMA_BASE
 
 
 def dedup(sources: List[Source]) -> List[Source]:
@@ -627,7 +628,7 @@ Rules:
             "think": False,
         }
         with httpx.Client(timeout=60.0) as client:
-            r = client.post("http://localhost:11434/api/chat", json=payload)
+            r = client.post(f"{OLLAMA_BASE}/api/chat", json=payload)
             r.raise_for_status()
         raw = (r.json().get("message") or {}).get("content", "").strip()
 

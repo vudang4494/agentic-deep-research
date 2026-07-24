@@ -3,7 +3,7 @@
 > **Vai trò:** nơi DUY NHẤT trả lời *"còn phải làm gì, theo thứ tự nào"*.
 > **Không changelog** (việc đã xong để lại đúng 1 dòng; post-mortem → `memory/long-memory.md`) · **không số dòng code** (dùng grep anchor) · **không số đo một lần** (đo lại rồi hãy tin).
 > Ngưỡng & gate hiện hành → `docs/RULES.md` → cuối cùng là **code**. Doctrine → `CLAUDE.md §2`.
-> Bản thiết kế v3 gốc + khung eval tháng 6 (đã supersede) → `docs/archive/plan-v3-design-2026-06.md`.
+> Lịch sử thiết kế v3 gốc + khung eval tháng 6 (đã supersede) → `git log` / `memory/long-memory.md`.
 
 ## Bất biến — áp cho MỌI item dưới đây
 **LOCAL-only** · **Verifier ≠ Writer** · **fix ở GATE, không ở writer** · **outline emerge từ evidence** · **KHÔNG fine-tune & KHÔNG build dataset** (mọi lever là retrieval/verify/revise-loop/prompt/evidence-selection).

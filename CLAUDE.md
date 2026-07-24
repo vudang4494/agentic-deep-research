@@ -47,7 +47,7 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 | 3 | Assemble | `deep_research_v3.py` | book.md + math/heading hygiene (Stage F) + **`decite.clean_intrabook_citations`** (trong `_sanitize_section_content`): gỡ name-drop nội-sách (writer trích TITLE section anh em như thể paper ngoài), CHỈ xoá khi khớp đúng một section title — `[N]`/cite ngoài được GIỮ |
 | 4 | Render `--render` | `scripts/render_book.py` | book.pdf / book.html |
 
-Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift).
+Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift).
 
 **Hai hành vi orchestrator dễ hiểu nhầm khi đọc log/state:**
 - **ReAct re-dispatch** (`deep_research_v3.py`, grep `ReAct re-dispatch`): section ném `RuntimeError` (P0a/StageE block) được **retry MỘT lần** với `max_rounds+2` + union provider set *trước khi* stub `[BLOCKED]`. → block-rate trong `state.json` là số **sau** retry; và đây là lý do một section chạy hai lượt.

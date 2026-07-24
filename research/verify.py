@@ -19,8 +19,7 @@ import httpx
 from .embeddings import embed as _embed, cosine as _cosine
 from .types import Source
 from .config import JUDGE_MODEL, EMBED_MODEL
-
-OLLAMA_BASE = "http://localhost:11434"
+from ._ollama import OLLAMA_BASE
 DEFAULT_JUDGE_MODEL = JUDGE_MODEL
 DEFAULT_TIMEOUT = 150.0  # was 60s: a 12-34 citation batch needs more than 60s; a timeout used to
                           # fail-CLOSED the WHOLE section to no_evidence=0.3 (false floor) -- see chunked judge.

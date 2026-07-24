@@ -24,8 +24,7 @@ from . import search as _search
 from .query_gen import _strip_think
 from .types import Query
 from .config import WRITER_MODEL, EMBED_MODEL
-
-OLLAMA_BASE = "http://localhost:11434"
+from ._ollama import OLLAMA_BASE
 DEFAULT_PLANNER_MODEL = WRITER_MODEL
 # If the planner model fails (OOM, timeout), planner falls back to a hardcoded outline.
 DEFAULT_TIMEOUT = 480.0

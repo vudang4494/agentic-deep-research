@@ -19,11 +19,12 @@ Key differences from v2:
   - Cross-section overlap is checked before accepting a section
   - Topic drift is rejected even when citations exist
 """
-import httpx, json, re, time
+import re, time
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 
-OLLAMA_BASE = "http://localhost:11434"
+from ._ollama import chat as _ollama_chat
+
 TIMEOUT = 300.0
 
 # Import research layer components
@@ -61,25 +62,6 @@ class SectionResult:
     citation_markers: List[str] = field(default_factory=list)
     quality: str = "ok"
     cross_ref_count: int = 0  # GATE-6: Number of cross-references to prior sections
-
-
-def _ollama_chat(model: str, messages: list, temperature: float = 0.7,
-                 num_predict: int = 4000, timeout: float = TIMEOUT) -> str:
-    payload = {
-        "model": model,
-        "stream": False,
-        "think": False,
-        "messages": messages,
-        "options": {"temperature": temperature, "num_predict": num_predict},
-    }
-    with httpx.Client(timeout=timeout) as c:
-        r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
-        r.raise_for_status()
-        data = r.json()
-    content = (data.get("message") or {}).get("content", "").strip()
-    if not content:
-        content = (data.get("message") or {}).get("thinking", "").strip()
-    return content
 
 
 def _concept_decomposition(text: str) -> List[str]:

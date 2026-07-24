@@ -17,6 +17,7 @@ breaks one is caught here instead of three runs later:
   F. no model literals     -- model names live in config.py, not sprinkled at call sites
   G. mathfix single-source -- no local re-implementation of math normalization
   H. providers well-formed -- PROVIDERS_DEFAULT holds only known provider names
+  I. Ollama single-source  -- the endpoint literal lives only in research/_ollama.py
 """
 import argparse
 import ast
@@ -40,6 +41,8 @@ EXTERNAL_LLM_HOSTS = (
 KNOWN_PROVIDERS = {"arxiv", "wikipedia", "tavily", "brave", "ddg"}
 MODEL_LITERAL_RE = re.compile(r"[\"'](?:gemma[\w.]*:[\w.-]+|batiai/[\w.\-]+:[\w.]+|bge-m3[\w:.-]*)[\"']")
 NOMIC_RE = re.compile(r"\bnomic\b|nomic-embed")  # 'economic' must not match
+OLLAMA_HOST_RE = re.compile(r"(?:localhost|127\.0\.0\.1):11434")
+OLLAMA_MODULE = "research/_ollama.py"  # the single source of the Ollama endpoint
 
 # Acceptance tests: standalone scripts (this repo does not use pytest). Each must exit 0.
 ACCEPTANCE = [
@@ -266,6 +269,28 @@ def check_providers():
         ok("H. providers", f"{len(names)} known providers: {', '.join(names)}")
 
 
+# ------------------------------------------------ I. Ollama single-source
+def check_ollama_single_source():
+    """The Ollama endpoint literal appears in exactly one module (research/_ollama.py);
+    every other caller imports OLLAMA_BASE from there. Same drift guard as D/F -- one
+    HTTP layer instead of the eight copy-pasted 'http://localhost:11434' literals that
+    used to live across the research modules."""
+    offenders = []
+    for p in py_files():
+        if rel(p) == OLLAMA_MODULE:
+            continue
+        for i, line in enumerate(source_of(p).split("\n"), 1):
+            code = line.split("#", 1)[0]  # a trailing comment may mention the port
+            if OLLAMA_HOST_RE.search(code):
+                offenders.append(f"{rel(p)}:{i}")
+    if offenders:
+        fail("I. Ollama single-source",
+             f"endpoint literal outside {OLLAMA_MODULE}: {', '.join(offenders[:4])}")
+    else:
+        ok("I. Ollama single-source",
+           f"endpoint only in {OLLAMA_MODULE}; all callers import OLLAMA_BASE")
+
+
 # ---------------------------------------------------------- acceptance tests
 def ollama_up():
     try:
@@ -308,7 +333,8 @@ def main():
 
     for fn in (check_imports, check_local_only, check_verifier_not_writer,
                check_embed_unified, check_constant_drift, check_model_literals,
-               check_mathfix_single_source, check_providers):
+               check_mathfix_single_source, check_providers,
+               check_ollama_single_source):
         try:
             fn()
         except Exception as e:  # a broken check must not masquerade as a pass
