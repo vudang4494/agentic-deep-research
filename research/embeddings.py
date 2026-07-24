@@ -4,8 +4,10 @@ from typing import List
 
 import httpx
 
+from .config import EMBED_MODEL
+
 OLLAMA_BASE = "http://localhost:11434"
-DEFAULT_MODEL = "bge-m3:latest"
+DEFAULT_MODEL = EMBED_MODEL
 TIMEOUT = 60.0
 
 

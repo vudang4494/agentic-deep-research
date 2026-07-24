@@ -18,7 +18,7 @@ import httpx
 
 from .embeddings import embed as _embed, cosine as _cosine
 from .types import Source
-from .config import JUDGE_MODEL
+from .config import JUDGE_MODEL, EMBED_MODEL
 
 OLLAMA_BASE = "http://localhost:11434"
 DEFAULT_JUDGE_MODEL = JUDGE_MODEL
@@ -36,7 +36,6 @@ MAX_EVIDENCE_CHARS = 1200
 # evidence at cos~0.77) that INFLATED cite_precision with zero LLM check. Only near-verbatim auto-passes now.
 AUTO_SUPPORT_COS = 0.90
 AUTO_UNRELATED_COS = 0.30
-EMBED_MODEL = "bge-m3:latest"
 
 # Map verdicts to numeric grounding scores (0..1).
 _VERDICT_SCORE = {

@@ -23,7 +23,7 @@ from training the models.** That keeps it topic-agnostic, prompt-robust, and aud
 
 A full end-to-end output is published so you can judge it by the artifact, not the claims:
 
-### ▸ [**Download `book.pdf` — RLHF, 995 pages**](https://github.com/vudang4494/agentic/releases/tag/book900-rlhf-demo)  *(GitHub Release)*
+### ▸ [**Download `book.pdf` — RLHF, 995 pages**](https://github.com/vudang4494/agentic-deep-research/releases/tag/book900-rlhf-demo)  *(GitHub Release)*
 
 | Metric | Value | How verified |
 |---|---|---|

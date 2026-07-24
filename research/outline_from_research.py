@@ -13,7 +13,7 @@ import httpx, json, re
 from dataclasses import dataclass, field
 from typing import List
 
-from .config import OUTLINE_MODEL
+from .config import OUTLINE_MODEL, EMBED_MODEL
 
 OLLAMA_BASE = "http://localhost:11434"
 TIMEOUT = 300.0
@@ -742,7 +742,7 @@ def _relate_and_differentiate_sections(outline, topic_profile,
                 flat.append((t, sec, f"{t}. {g}"[:400]))
         if len(flat) < 2:
             return
-        vecs = embed([f for _, _, f in flat], model="bge-m3:latest")
+        vecs = embed([f for _, _, f in flat], model=EMBED_MODEL)
         if not vecs or len(vecs) != len(flat):
             print("[OUTLINE] relate/dedup skipped: embed unavailable")
             return
