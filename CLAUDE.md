@@ -44,10 +44,10 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 | 2e | Writer (WRT) | `deep_investigate.py` (inline) | `qwen3.6-35b:iq3` |
 | 2f | Grounding (VFY) | `research/faithfulness.py` | HHEM v2 — **ADVISORY/log-only**, không hard-block |
 | 2g | Topic / Cross-ref | `research/verify.py` | topic = **G4** blend term-heuristic + `answer_relevance` gemma LOCAL (grep `def topic_relevance_check`) + StageE floor; cross-ref = regex string match |
-| 3 | Assemble | `deep_research_v3.py` | book.md + math/heading hygiene (Stage F) + **`decite.clean_intrabook_citations`** (trong `_sanitize_section_content`): gỡ name-drop nội-sách (writer trích TITLE section anh em như thể paper ngoài), CHỈ xoá khi khớp đúng một section title — `[N]`/cite ngoài được GIỮ |
+| 3 | Assemble | `deep_research_v3.py` | book.md + math/heading hygiene (Stage F) + **`decite.clean_intrabook_citations`** (trong `_sanitize_section_content`): gỡ name-drop nội-sách (writer trích TITLE section anh em như thể paper ngoài), CHỈ xoá khi khớp đúng một section title — `[N]`/cite ngoài được GIỮ + **`dedup.drop_duplicate_sentences`** (Stage-F, deletion-only): bỏ câu boilerplate lặp y hệt xuyên chương, GIỮ lần đầu; byte-conservative (paragraph không dup = nguyên si), bảo vệ code/math/heading/reference. `state.json` ghi **`provenance`** (git SHA + seed=42 + model digest) cho reproducibility |
 | 4 | Render `--render` | `scripts/render_book.py` | book.pdf / book.html |
 
-Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift).
+Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`dedup.py`** (Stage-F exact-duplicate sentence remover, deletion-only — single source; test `eval/test_dedup_sentences.py`), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift).
 
 **Hai hành vi orchestrator dễ hiểu nhầm khi đọc log/state:**
 - **ReAct re-dispatch** (`deep_research_v3.py`, grep `ReAct re-dispatch`): section ném `RuntimeError` (P0a/StageE block) được **retry MỘT lần** với `max_rounds+2` + union provider set *trước khi* stub `[BLOCKED]`. → block-rate trong `state.json` là số **sau** retry; và đây là lý do một section chạy hai lượt.
@@ -75,7 +75,7 @@ Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT
 
 | Gate | Hành vi | Grep |
 |------|---------|------|
-| **P0a domain gate** | `ev_threshold = min(0.40, max(0.30, min_topic_relevance−0.10))` — **HARD BLOCK** ở round cuối, PRE-writer | `ev_threshold =` trong `deep_investigate.py` |
+| **P0a domain gate** | `ev_threshold = min(0.40, max(0.30, min_topic_relevance−0.10))` — **HARD BLOCK** ở round cuối, PRE-writer. **Near-miss rescue (P1-4):** nếu `ev_topic_rel` chỉ dưới bar trong `_NEAR_MISS_DELTA` (0.10) → cấp **1 bonus round** re-query focused vào `must_cover` TRƯỚC khi BLOCK (fire 1 lần; section vẫn phải clear bar — không hạ ngưỡng) | `ev_threshold =` / `_near_miss_used` trong `deep_investigate.py` |
 | **Accept Section** | `topic≥0.50 (G4) AND n_cites>0 AND cross-ref AND cite_precision≥0.45 (G2)`; grounding KHÔNG tham gia | `gate_ok =` trong `deep_investigate.py` |
 | **StageE HARD BLOCK** | fire khi `not accepted AND best_topic_relevance<0.50` (sau-loop, độc lập grounding) | `StageE HARD BLOCK` |
 | **P0c seen-penalty** | `max(0.05, (1 − seen/max_seen)²)`; canonical + pool-rescued **EXEMPT** | `seen_counts` trong `notes.py` |
@@ -125,7 +125,9 @@ python3 eval/test_outline_enforce.py       # anti-matrix enforce: collapse/no-op
 python3 eval/test_decite.py                # citation cleaner: gỡ name-drop, GIỮ cite ngoài
 python3 eval/test_verify_optim.py          # verify layer
 python3 eval/test_math_char_safety.py      # mathfix/BM25 char-safety (BẮT BUỘC khi đụng mathfix.py)
+python3 eval/test_dedup_sentences.py       # Stage-F sentence dedup: xoá dup, GIỮ ref/code/math/heading
 python3 eval/bench_cite_discrimination.py  # G2 judge có discriminate không (chống rubber-stamp)
+python3 eval/held_out_judge.py             # de-circle eval: kappa gemma vs model khác họ (auto-pick / --held-out)
 python3 eval/smoke_test_p0.py --topic "Transformer" --canonical-ids "1706.03762,1607.06450"
 
 # Đo chất lượng (LOCAL, bge-m3) — LUÔN đo lại, đừng quote số cũ trong doc

@@ -48,6 +48,7 @@ OLLAMA_MODULE = "research/_ollama.py"  # the single source of the Ollama endpoin
 ACCEPTANCE = [
     ("eval/test_outline_enforce.py", "outline anti-matrix enforcement", False),
     ("eval/test_decite.py", "intra-book citation cleaner", False),
+    ("eval/test_dedup_sentences.py", "assemble-time sentence dedup", False),
     ("eval/test_math_char_safety.py", "math/special-char safety", False),
     ("eval/test_verify_optim.py", "verify layer", True),  # needs_ollama
 ]

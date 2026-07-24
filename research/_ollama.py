@@ -28,19 +28,23 @@ DEFAULT_TIMEOUT = 300.0
 
 
 def chat(model: str, messages: list, temperature: float = 0.3,
-         num_predict: int = 2000, timeout: float = DEFAULT_TIMEOUT) -> str:
+         num_predict: int = 2000, timeout: float = DEFAULT_TIMEOUT,
+         seed: int | None = 42) -> str:
     """One /api/chat round (stream off, think off).
 
     Raises on transport failure (httpx / non-2xx). Falls back to the `thinking`
     field when `content` is empty -- the exact behavior the three collapsed
-    `_ollama_chat` copies had.
+    `_ollama_chat` copies had. `seed` defaults to 42 for reproducibility.
     """
+    options = {"temperature": temperature, "num_predict": num_predict}
+    if seed is not None:
+        options["seed"] = seed
     payload = {
         "model": model,
         "stream": False,
         "think": False,
         "messages": messages,
-        "options": {"temperature": temperature, "num_predict": num_predict},
+        "options": options,
     }
     with httpx.Client(timeout=timeout) as c:
         r = c.post(f"{OLLAMA_BASE}/api/chat", json=payload)
