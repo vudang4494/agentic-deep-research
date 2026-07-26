@@ -50,6 +50,10 @@ ACCEPTANCE = [
     ("eval/test_decite.py", "intra-book citation cleaner", False),
     ("eval/test_dedup_sentences.py", "assemble-time sentence dedup", False),
     ("eval/test_math_char_safety.py", "math/special-char safety", False),
+    # NOT here: test_citation_graph.py (guards an UNWIRED module; vacuous without a network
+    # fixture) and verify_book_standards.py (audits a FROZEN gitignored run artifact, so it
+    # tracks no code change AND sys.exit(1)s on any fresh checkout where the book is absent).
+    # Both remain runnable standalone; a ship gate must hold only self-contained code tests.
     ("eval/test_verify_optim.py", "verify layer", True),  # needs_ollama
 ]
 

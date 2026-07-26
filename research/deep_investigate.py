@@ -74,7 +74,6 @@ def _concept_decomposition(text: str) -> List[str]:
         r"\b[A-Z][a-z]+(?:[- ][A-Z][a-z]+)+\b",  # Multi-word proper nouns
         r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b",  # CamelCase
         r"\b(?:Transformer|Attention|GPT|LLM|BERT|RLHF|LoRA|RAG|DPO)\b",
-        r"\b\w+(?:-\w+){{1,3}}\b",  # Hyphenated terms
     ]
     concepts = []
     seen = set()
@@ -208,6 +207,7 @@ WRITE RULES:
   algorithmic. GROUND every formula/step in a cited source [N] -- do NOT invent equations or
   steps the evidence does not contain (if the math is absent, explain the mechanism in words
   and say so). Prefer ONE correct, fully-derived mechanism over a broad shallow survey.
+- ALGORITHMIC & MATHEMATICAL DIAGRAMS: Do NOT output generic high-level mindmaps or trivial concept boxes. Diagrams MUST depict precise technical mechanisms: (a) Mathematical proof / derivation chains (e.g. gradient backprop steps dL/dW, loss formulation steps), (b) Tensor shape transformations (e.g. [B, T, D] -> Query projection -> [B, H, T, d_k]), or (c) Algorithmic execution flowcharts with exact conditional logic. Write concise technical labels with exact formulas or tensor dimensions.
 - If a required term is missing from the evidence, say the literature is limited rather than inventing details.
 """
 
@@ -221,7 +221,6 @@ def investigate_section(
     prior_concepts: List[str] = None,     # concepts already covered elsewhere
     providers: tuple = PROVIDERS_DEFAULT,  # incl tavily; was ("arxiv","wikipedia","ddg") -> silently dropped tavily
     embed_model: str = EMBED_MODEL,
-    reranker_model: str = "BAAI/bge-reranker-v2-m3",
     writer_model: str = WRITER_MODEL,
     judge_model: str = JUDGE_MODEL,
     max_rounds: int = 3,
@@ -301,6 +300,9 @@ def investigate_section(
     best_cite_markers: list = []
     best_cross_refs = 0
     _best_round_tuple: tuple = (0, 0.0, 0.0, 0)  # (not_near_dup, topic, grounding, has_cites)
+    _have_best = False  # first-selection sentinel; NOT `best_score==0.0` -- grounding is
+                        # legitimately 0.0 on synthesized prose, which used to make every later
+                        # round overwrite the best (last-round-wins, defeating topic-first select).
     all_concepts = []
     research_rounds = 0
     accepted = False  # P0: True iff a round cleanly passed the live gates (quality='ok')
@@ -379,16 +381,30 @@ def investigate_section(
                 return s
             existing_norm = {_norm(getattr(s, "id", "") or "") for s in raw_sources}
             existing_urls_norm = {_norm(getattr(s, "url", "") or "") for s in raw_sources}
+            # Reuse the papers already fetched once into canonical_forced (before the loop) instead
+            # of re-hitting arxiv per pid EVERY round -- each id_list fetch sleeps ARXIV_MIN_INTERVAL
+            # (~4s), so refetching canonicals the keyword search missed cost ~4s x pids x rounds of
+            # pure redundant wall-clock. Network fetch only for a pid genuinely absent from the batch.
+            _canon_by_norm = {}
+            for _c in canonical_forced:
+                _canon_by_norm.setdefault(_norm(getattr(_c, "id", "") or ""), _c)
+                _cu = _norm(getattr(_c, "url", "") or "")
+                if _cu:
+                    _canon_by_norm.setdefault(_cu, _c)
             protected_sources = []
             for pid in protected_source_ids:
                 pid_norm = _norm(pid)
                 if pid_norm and pid_norm not in existing_norm and pid_norm not in existing_urls_norm:
-                    try:
-                        canon = _search.arxiv_by_id([pid])
-                        if canon:
-                            protected_sources.extend(canon)
-                    except Exception:
-                        pass
+                    canon = _canon_by_norm.get(pid_norm)
+                    if canon is not None:
+                        protected_sources.append(canon)
+                    else:
+                        try:
+                            fetched = _search.arxiv_by_id([pid])
+                            if fetched:
+                                protected_sources.extend(fetched)
+                        except Exception:
+                            pass
             if protected_sources:
                 print(f"  [R{round_n}] P0b: injected {len(protected_sources)} canonical papers")
                 raw_sources = protected_sources + raw_sources
@@ -408,8 +424,7 @@ def investigate_section(
             overlap_count = sum(
                 1 for s in raw_sources
                 if (getattr(s, "id", "") or "") in seen_ids
-                or any((getattr(s, "url", "") or "") == prior_url
-                        for prior_url in seen_ids)
+                or (getattr(s, "url", "") or "") in seen_ids
             )
             overlap_frac = overlap_count / len(raw_sources)
             print(f"  [OVERLAP r{round_n}] {overlap_count}/{len(raw_sources)} "
@@ -785,9 +800,10 @@ def investigate_section(
             g = grounding
             c = 1 if n_cites > 0 else 0
             return (nd, t, g, c)
-        if best_score == 0.0 or _round_tuple() > _best_round_tuple:
+        if not _have_best or _round_tuple() > _best_round_tuple:
+            _have_best = True
             best_content = content
-            best_score = grounding
+            best_score = grounding  # reporting only -- must NOT drive selection
             best_topic_relevance = topic_relevance
             best_sources = ranked
             best_evidence = evidence_block
