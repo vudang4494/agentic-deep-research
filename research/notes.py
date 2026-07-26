@@ -649,10 +649,14 @@ Rules:
             else:
                 final_score = (llm_score + keyword_score) / 2.0
 
-            # Provider contamination penalty: if top provider > 70%, penalize
-            if top_provider_pct > 0.50:
+            # Provider contamination penalty: a NON-primary web provider swamping the pool signals
+            # a cluster, but arxiv/wikipedia dominance is DELIBERATE (rank_rrf boosts them +
+            # primary_floor reserves slots), so an arxiv-heavy pool -- the engineered norm -- must
+            # NOT be docked toward the ~0.40 P0a block bar. Penalize only non-primary dominance.
+            _dominant = max(provider_counts, key=provider_counts.get) if provider_counts else ""
+            if top_provider_pct > 0.50 and _dominant not in _PRIMARY_PROVIDERS:
                 final_score = final_score * 0.85
-                llm_reason += f" (provider concentration {top_provider_pct:.0%} may indicate cluster)"
+                llm_reason += f" (provider concentration {top_provider_pct:.0%} from {_dominant} may indicate cluster)"
 
             final_score = max(0.0, min(1.0, round(final_score, 3)))
 

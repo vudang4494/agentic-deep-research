@@ -22,9 +22,13 @@ def is_substantive_technical_diagram(code: str) -> bool:
     if len(lines) < 3:
         return False
     tech_markers = (
-        r"\b\d+d\b", r"\[.*?\b(?:batch|seq|dim|head|hidden|size|shape|loss|grad|step|layer|state|q|k|v|w|b)\b.*?\]",
+        r"\b\d+d\b", r"\[.*?\b(?:batch|seq|dim|head|hidden|size|shape|loss|grad|step|layer|state)\b.*?\]",
         r"\b(?:dL/d|dW|d\theta|forward|backward|backprop|softmax|arg|loss|cross-entropy|projection|attention|ppo|reward|mcts|actor|critic)\b",
-        r"[\=+\-*/\\]", r"\$\$.*?\$\$|\\\(.*?\\\)"
+        # An operator FLANKED BY word chars = a real expression (x=y, a+b, dL/dW). The old
+        # bare class `[\=+\-*/\\]` matched the '-' in every mermaid edge (-->, ---) and the '=' in
+        # ==>, so it kept ANY diagram with edges -- defeating the trivial-mindmap filter. Excluding
+        # a bare '-' also avoids matching hyphenated node labels (self-attention).
+        r"\w\s*[=+*/^]\s*\w", r"\$\$.*?\$\$|\\\(.*?\\\)"
     )
     has_tech = any(re.search(pat, code, re.I) for pat in tech_markers)
     return has_tech or len(lines) >= 5
@@ -95,6 +99,25 @@ def promote_bold_headings(content: str) -> str:
     return "\n".join(out)
 
 
+def _extract_and_strip_title(content: str, default: str = "Technical Book"):
+    """Pull the book title from the leading non-numbered '# ...' H1 (assemble writes it as
+    '# <outline.title>') and REMOVE that line from the body. pandoc renders the title via
+    \\maketitle from metadata; leaving the H1 in the body would duplicate it as an opening
+    chapter. Numbered '# N. ...' chapter headings are left intact. Returns (title, body).
+    This replaces the two hardcoded, topic-mismatched title constants the render paths used."""
+    lines = content.split("\n")
+    for i, ln in enumerate(lines):
+        if not ln.strip():
+            continue
+        m = re.match(r"^#\s+(.+)$", ln.strip())
+        if m and not re.match(r"^\d+\.", m.group(1).strip()):
+            title = m.group(1).strip()
+            del lines[i]
+            return title, "\n".join(lines)
+        break  # first non-empty line is not a title H1 -> leave body unchanged
+    return default, content
+
+
 def clean_md(content: str, run_dir: Path = None) -> str:
     """Apply math fixes and markdown hygiene to the full book markdown."""
     lines = content.split("\n")
@@ -163,7 +186,7 @@ _PREAMBLE = r"""
 """
 
 
-def render_tectonic(clean_md_path: Path, output_pdf: Path) -> bool:
+def render_tectonic(clean_md_path: Path, output_pdf: Path, title: str = "Technical Book") -> bool:
     """Render via pandoc -> LaTeX -> tectonic, in TWO steps so we can pass tectonic's
     `-Z continue-on-errors`: in a 250k-word LLM-generated book a single residual TeX error
     (an undefined macro, a malformed \\frac) would otherwise abort the WHOLE render and drop us
@@ -180,7 +203,7 @@ def render_tectonic(clean_md_path: Path, output_pdf: Path) -> bool:
          "-V", "documentclass=report",
          "-V", "geometry:margin=0.85in", "-V", "fontsize=10.5pt", "-V", "papersize=a4",
          "-V", "colorlinks=true", "-V", "linkcolor=accent", "-V", "urlcolor=accent",
-         "--metadata", "title=Agentic AI Systems: Autonomous Agents, Planning, Memory, and Tool Integration"],
+         "--metadata", f"title={title}"],
         capture_output=True, text=True,
     )
     if r1.returncode != 0:
@@ -212,13 +235,13 @@ def render_tectonic(clean_md_path: Path, output_pdf: Path) -> bool:
     return False
 
 
-def render_weasy(clean_md_path: Path, output_pdf: Path) -> bool:
+def render_weasy(clean_md_path: Path, output_pdf: Path, title: str = "Technical Book") -> bool:
     """Render via pandoc --html + weasyprint."""
     html_path = output_pdf.with_suffix(".html")
     r = subprocess.run(
         ["pandoc", str(clean_md_path), "-o", str(html_path),
          "--standalone", "--toc", "--toc-depth=3", "--mathml",
-         "--metadata", "title=Large Language Models: A Comprehensive Handbook"],
+         "--metadata", f"title={title}"],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
@@ -247,9 +270,10 @@ def main():
 
     print(f"Reading: {book_md}")
     content = book_md.read_text(encoding="utf-8")
+    title, content = _extract_and_strip_title(content)
     wc = len(content.split())
     lines = content.count("\n") + 1
-    print(f"  {wc} words, {lines} lines")
+    print(f"  {wc} words, {lines} lines | title: {title}")
 
     print("Cleaning math & rendering diagrams...")
     cleaned = clean_md(content, run_dir)
@@ -259,13 +283,13 @@ def main():
 
     if args.weasy:
         print("Rendering via weasyprint...")
-        ok = render_weasy(clean_md_out, output_pdf)
+        ok = render_weasy(clean_md_out, output_pdf, title)
     else:
         print("Rendering via tectonic...")
-        ok = render_tectonic(clean_md_out, output_pdf)
+        ok = render_tectonic(clean_md_out, output_pdf, title)
         if not ok:
             print("  fallback: weasyprint...")
-            ok = render_weasy(clean_md_out, output_pdf)
+            ok = render_weasy(clean_md_out, output_pdf, title)
 
     if ok:
         sz = output_pdf.stat().st_size

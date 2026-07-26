@@ -141,6 +141,11 @@ def test_mathfix_render_robustness():
     check("undefined-macro span -> literal code", r"`$\frobnicate{x}$`" in out, out)
     check("good span beside it preserved", r"$\frac{a}{b}$" in out, out)
 
+    # Mermaid diagram block protection in normalize_math (P3)
+    mermaid_block = "```mermaid\ngraph TD;\n  A[Input] -->|forward| B(Loss);\n```"
+    norm_m = normalize_math(f"Text before\n\n{mermaid_block}\n\nText after")
+    check("Mermaid block survives normalize_math intact", mermaid_block in norm_m, norm_m)
+
 
 if __name__ == "__main__":
     test_extraction_angle_brackets()
