@@ -577,6 +577,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
                     # verdict was only recoverable by grepping the run log (BAER still does), and
                     # unrecoverable once that log was gone.
                     "cite_precision": result.cite_precision,
+                    "explanation_depth": result.explanation_depth,  # advisory, never gates
                 }
                 total_w += len(result.content.split())
                 # grow the agentic evidence pool with this section's real sources (most-recent kept)

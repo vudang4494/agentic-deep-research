@@ -40,7 +40,7 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 | 2 | Deep Investigation | `research/deep_investigate.py` | vòng lặp per-section `max_rounds` — **3 default khác nhau**: CLI `--max-rounds`=3 · `run_v3()`=2 · `run_full.sh N_ROUNDS`=2 |
 | 2a | Query Gen (QGN) | `research/query_gen.py` + `query_router.py` | LLM khi có `domain_context`, else archetype |
 | 2b | Search (RSR) | `research/search.py` | `PROVIDERS_DEFAULT` ở `config.py` = arxiv · wikipedia · tavily · brave · ddg. `available_providers()` tự lọc: **tavily** cần `TAVILY_API_KEY`, **brave** cần `BRAVE_API_KEY` (free ~2000 q/mo) → liệt kê mà thiếu key = no-op an toàn. ⚠️ **Tavily billing-dead (HTTP 402, 402≠401 → đổi key KHÔNG chữa; kiểm lại trước khi kết luận)** → thực tế còn arxiv+wiki+ddg(+brave nếu có key) |
-| 2c | Rerank (RRK) | `research/rerank.py` | `bge-reranker-v2-m3` (transformers, KHÔNG Ollama) |
+| 2c | Rerank (RRK) + **MMR** | `research/rerank.py` + `notes.select_diverse` | cross-encoder `bge-reranker-v2-m3` lấy pool rộng → **MMR (Carbonell&Goldstein 1998)** chọn bộ cuối cân bằng relevance ∧ diversity. Lý do: mọi khâu trước chỉ tối ưu relevance → top-k thành N bản kể lại một ý → writer chỉ gom góp được. Canonical được seed vào, không bao giờ bị loại vì trùng. Grep `select_diverse` / `_MMR_LAMBDA` |
 | 2d | Rank + Gate | `research/notes.py` | RRF(BM25+cosine) + **P0a** domain gate + **P0c** seen-penalty + prefilter + **evidence-pool rescue** (post-prefilter on-topic quá ít → mượn sibling sources, P0c-EXEMPT; grep `_pool_rescue_ids`) |
 | 2e | Writer (WRT) | `deep_investigate.py` (inline) | `qwen3.6-35b:iq3` |
 | 2f | Grounding (VFY) | `research/faithfulness.py` | HHEM v2 — **ADVISORY/log-only**, không hard-block |
@@ -48,7 +48,7 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 | 3 | Assemble | `deep_research_v3.py` | book.md + math/heading hygiene (Stage F) + **`decite.clean_intrabook_citations`** (trong `_sanitize_section_content`): gỡ name-drop nội-sách (writer trích TITLE section anh em như thể paper ngoài), CHỈ xoá khi khớp đúng một section title — `[N]`/cite ngoài được GIỮ + **`dedup.drop_duplicate_sentences`** (Stage-F, deletion-only): bỏ câu boilerplate lặp y hệt xuyên chương, GIỮ lần đầu; byte-conservative (paragraph không dup = nguyên si), bảo vệ code/math/heading/reference. `state.json` ghi **`provenance`** (git SHA + seed=42 + model digest) cho reproducibility |
 | 4 | Render `--render` | `scripts/render_book.py` | book.pdf / book.html |
 
-Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`dedup.py`** (Stage-F exact-duplicate sentence remover, deletion-only — single source; test `eval/test_dedup_sentences.py`), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift).
+Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `planner.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`explain.py`** (tín hiệu explanatory-depth — **ADVISORY, KHÔNG gate**: đo section có *dạy* hay chỉ *khẳng định*; deterministic, không model. Đo trước–calibrate–rồi mới bàn tới gate), **`dedup.py`** (Stage-F exact-duplicate sentence remover, deletion-only — single source; test `eval/test_dedup_sentences.py`), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift).
 
 **Hai hành vi orchestrator dễ hiểu nhầm khi đọc log/state:**
 - **ReAct re-dispatch** (`deep_research_v3.py`, grep `ReAct re-dispatch`): section ném `RuntimeError` (P0a/StageE block) được **retry MỘT lần** với `max_rounds+2` + union provider set *trước khi* stub `[BLOCKED]`. → block-rate trong `state.json` là số **sau** retry; và đây là lý do một section chạy hai lượt.
@@ -145,6 +145,7 @@ python3 eval/test_decite.py                # citation cleaner: gỡ name-drop, G
 python3 eval/test_verify_optim.py          # verify layer
 python3 eval/test_math_char_safety.py      # mathfix/BM25 char-safety (BẮT BUỘC khi đụng mathfix.py)
 python3 eval/test_dedup_sentences.py       # Stage-F sentence dedup: xoá dup, GIỮ ref/code/math/heading
+python3 eval/test_mmr_diversity.py         # MMR: chọn đa dạng thật, canonical không bị loại, fail-open
 python3 eval/bench_cite_discrimination.py  # G2 judge có discriminate không (chống rubber-stamp)
 python3 eval/held_out_judge.py             # de-circle eval: kappa gemma vs model khác họ (auto-pick / --held-out)
 python3 eval/smoke_test_p0.py --topic "Transformer" --canonical-ids "1706.03762,1607.06450"

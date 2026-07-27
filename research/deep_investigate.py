@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 
 from ._ollama import chat as _ollama_chat
+from . import explain as _explain
 
 TIMEOUT = 300.0
 
@@ -63,6 +64,7 @@ class SectionResult:
     quality: str = "ok"
     cross_ref_count: int = 0  # GATE-6: Number of cross-references to prior sections
     cite_precision: Optional[float] = None  # G2 of the shipped round; None = never measured
+    explanation_depth: Optional[float] = None  # ADVISORY: does the section teach? (research/explain.py)
 
 
 def _concept_decomposition(text: str) -> List[str]:
@@ -508,10 +510,19 @@ def investigate_section(
                 print(f"  [R{round_n}] WARNING: canonical_coverage=0/{len(protected_source_ids)} "
                       f"(P0b will prepend to evidence)")
 
-        # --- RRK rerank ---
+        # --- RRK rerank -> MMR diversity selection ---
+        # Rerank a WIDER pool than we ship, then let MMR choose the final set. Reranking straight
+        # to 8 hands the writer the 8 most query-similar sources -- which are typically 8
+        # restatements of one point, so the section can only aggregate. Selecting for relevance
+        # AND mutual dissimilarity gives it facets to reconcile. Canonical papers are seeded into
+        # the MMR selection, so they can never be evicted for being similar to each other.
+        _MMR_POOL = 16
         try:
-            ranked = _rerank.rerank(retrieval_query, ranked, top_k=8)
-            print(f"  [R{round_n}] RRK: top-{len(ranked)}")
+            ranked = _rerank.rerank(retrieval_query, ranked, top_k=_MMR_POOL)
+            ranked = _notes.select_diverse(ranked, retrieval_query, top_k=8,
+                                           protected_ids=protected_source_ids,
+                                           embed_model=embed_model)
+            print(f"  [R{round_n}] RRK+MMR: top-{len(ranked)} (diverse)")
         except Exception as e:
             print(f"  [R{round_n}] RRK failed: {e}, using RRF top-8")
             ranked = ranked[:8]
@@ -1028,4 +1039,8 @@ def investigate_section(
         quality="ok" if accepted else "degraded",
         cross_ref_count=best_cross_refs,  # GATE-6: Cross-reference count (pinned to best_content's round)
         cite_precision=best_cite_precision,  # G2 of the shipped round -- the axis that usually decides accept
+        # ADVISORY (never gates): the one quality axis nothing else measures -- whether the shipped
+        # prose actually explains its mechanism. Recorded so a future gate can be calibrated on
+        # real runs instead of guessed, exactly how grounding should have been handled.
+        explanation_depth=_explain.explanation_depth(best_content)["score"] if best_content else None,
     )
