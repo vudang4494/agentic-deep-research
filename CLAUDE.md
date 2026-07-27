@@ -30,7 +30,8 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 
 - **Orchestrator LIVE:** `pipeline/deep_research_v3.py :: run_v3()`. Launcher: `run_full.sh`.
 - **Legacy v2 (ĐỪNG sửa như đang live):** `legacy/deep_research.py` + `runner.py` + `run.sh` + `watch.sh`. Vẫn bị `tools/monitor.py` / `eval/run_eval.py` import → còn sống nhưng KHÔNG phải đường chính.
-- **Resume KHÔNG có flag:** re-run cùng `--out-name` là resume tự động (nạp `state.json` + `run_seen_counts` từ `output/runs/<name>/`). **Không bao giờ viết lại Section đã có trong `state.json`** → muốn chạy sạch phải đổi `--out-name` hoặc xoá run-dir.
+- **Resume KHÔNG có flag:** re-run cùng `--out-name` là resume tự động (nạp `state.json` + `run_seen_counts` từ `output/runs/<name>/`). **Không bao giờ viết lại Section đã có trong `state.json`** → muốn chạy sạch phải đổi `--out-name` hoặc xoá run-dir; `--target-section X --force-regen` xoá đúng section đó rồi viết lại (thiếu `--force-regen` = không đụng gì).
+- **State ghi ATOMIC (`_atomic_write_text`: temp + `os.replace`).** `state.json` được rewrite sau MỖI section; `pkill` giữa lúc ghi từng để lại file cụt → resume crash, mất cả run. Mọi write JSON resume-critical phải giữ đường atomic này — đừng đổi về `write_text` thẳng.
 
 | # | Stage | File | Vai trò |
 |---|-------|------|---------|
@@ -90,7 +91,7 @@ Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT
 
 ## 6. Guardrails — tránh đi sai hướng product/process
 1. **Output goal > volume.** Đây là technical book đúng-topic, grounded, auditable — KHÔNG phải máy sinh chữ. Run 700 trang mà drift/lặp = **FAIL**. Đừng tối ưu section/word/completion trước topic purity & non-redundancy.
-2. **Grounding KHÔNG phải chất lượng.** HHEM strict-NLI under-score prose tổng hợp → đã bỏ khỏi gate, chỉ log. Tín hiệu SỐNG = **G4 topic** + **G2 cite_precision**. Đừng green-light run chỉ vì grounding; cũng đừng "sửa" nó.
+2. **Grounding KHÔNG phải chất lượng.** HHEM strict-NLI under-score prose tổng hợp → đã bỏ khỏi gate, chỉ log. Tín hiệu SỐNG = **G4 topic** + **G2 cite_precision**. Đừng green-light run chỉ vì grounding; cũng đừng "sửa" nó. ⚠️ **`grounding == 0.0` là giá trị HỢP LỆ, không phải sentinel "chưa có"** — dùng nó làm cờ (kiểu `if best_score == 0.0`) sẽ khiến best-round chọn nhầm round CUỐI, vứt draft on-topic và gây BLOCK oan (bug thật, đã fix bằng `_have_best`; grep `_have_best`).
 3. **Outline EMERGE từ evidence — GIẾT matrix pattern.** Không pre-template chapters×concepts. `outline_audit ok=false` → **sửa OUTLINE trước Stage 2**, không vá ở writer. *Matrix/overlap giờ ĐÃ tự động* qua `enforce_outline_structure()`. Còn LẠI thủ công = `coherence_low` + `missing_canonical_terms` (outline over-reach vào title hẹp/frontier) — chưa có lever tự động.
 4. **Fix ở GATE, không ở writer.** Drift / off-topic evidence / canonical thiếu / nguồn dominate phải chặn ở P0a/P0b/P0c/prefilter (`notes.py`, `deep_investigate.py`). Không cho writer "cứ viết rồi tính".
 5. **Canonical papers được PROTECT, không penalize.** `protected_source_ids` bypass cosine prefilter + EXEMPT khỏi P0c. Mọi thay đổi retrieval/dedup phải giữ exemption này (mất → canonical recall sụp về 0).
@@ -118,6 +119,14 @@ python3 pipeline/deep_research_v3.py --topic "RLHF" --out-name rlhf_v4 \
 #    Quên `--no-smoke` → book 2 chương; đó KHÔNG phải bug.
 #    Flag: --no-smoke · --max-rounds · --providers · --n-chapters / --sections-per-chapter (hint outline) · --render
 TOPIC="RLHF" OUT_NAME="rlhf_v5" CANONICAL_IDS="2203.02155" ./run_full.sh   # env-driven launcher
+
+# ⛔ GATE TRƯỚC KHI SHIP — chạy cái này, không chỉ test lẻ:
+python3 eval/verify_all.py            # static A–I + acceptance (cần Ollama cho test verify layer)
+python3 eval/verify_all.py --static   # chỉ static (giây, không cần Ollama)
+# Static check enforce BẤT BIẾN: A imports · B LOCAL-only · C Verifier≠Writer · D embed bge-m3 ·
+# E constant-drift vs config.py · F model literal · G mathfix single-source · H providers ·
+# I Ollama endpoint chỉ ở `_ollama.py`. FAIL = đừng ship. ACCEPTANCE chỉ nhận test TỰ-CHỨA
+# (không phụ thuộc run artifact trong `output/` — nó gitignored, fresh checkout sẽ đỏ oan).
 
 # Test — KHÔNG có pytest: mỗi file là script độc lập (`__main__` + tự `sys.path.insert` repo root),
 # chạy TỪ repo root, exit≠0 khi fail. "Chạy 1 test" = chạy đúng file đó.
