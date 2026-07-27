@@ -367,6 +367,7 @@ def _v3_stats(state: dict) -> dict:
     cites = [int(v.get("n_citations", 0) or 0) for v in rows]
     xrefs = [int(v.get("cross_refs", 0) or 0) for v in rows]
     cps = [float(v["cite_precision"]) for v in rows if v.get("cite_precision") is not None]
+    eds = [float(v["explanation_depth"]) for v in rows if v.get("explanation_depth") is not None]
     n = len(rows) or 1
     return {
         "n_sections": len(rows),
@@ -378,6 +379,7 @@ def _v3_stats(state: dict) -> dict:
         "grounding_inert": len({round(g, 4) for g in grounds}) <= 1,
         "cite_precision_mean": (sum(cps) / len(cps)) if cps else None,
         "cite_precision_n": len(cps),
+        "explanation_depth_mean": (sum(eds) / len(eds)) if eds else None,
         "words": sum(words),
         "cites": sum(cites),
         "sections_no_cite": sum(1 for c in cites if c == 0),
@@ -399,6 +401,10 @@ def _format_v3(s: dict, run_name: str, topic: str, era: str = "v3") -> str:
     L.append(f"{'Cite-precision G2':<26} " + (
         f"mean {cp:.3f} (n={s['cite_precision_n']}) -- gate 0.45"
         if cp is not None else "not persisted (pre-fix run; grep the log for cite_prec=)"))
+    ed = s.get("explanation_depth_mean")
+    L.append(f"{'Explanation depth':<26} " + (
+        f"mean {ed:.3f}  (ADVISORY -- teaches vs asserts; no gate yet)"
+        if ed is not None else "not measured (pre-fix run)"))
     L.append(f"{'Grounding (advisory)':<26} mean {s['grounding_mean']:.3f}" +
              ("   [INERT: constant -- not a quality signal]" if s["grounding_inert"] else ""))
     L.append(f"{'Words':<26} {s['words']:,}   (~{round(s['words'] / 450)} pages)")

@@ -333,6 +333,75 @@ def rank_rrf(sources: List[Source], section_prompt: str, top_k: int = 20,
     return _apply_primary_quota(scored, top_k, primary_floor, protected_ids)
 
 
+# Relevance-vs-diversity trade-off for select_diverse(). Relevance-leaning on purpose: the pool
+# reaching this point already cleared the domain gate, so the remaining job is to stop the final
+# set from being N restatements of the single best-matching source. Lives next to the logic that
+# reads it (single-source rule), not in config.py.
+_MMR_LAMBDA = 0.72
+
+
+def select_diverse(sources: List[Source], query: str, top_k: int = 8,
+                   lambda_: float = _MMR_LAMBDA, protected_ids=None,
+                   embed_model: str = EMBED_MODEL) -> List[Source]:
+    """Pick the final evidence set by Maximal Marginal Relevance (Carbonell & Goldstein, 1998).
+
+        MMR = argmax over d in R\\S of  [ lambda * rel(d, q) - (1 - lambda) * max sim(d, s in S) ]
+
+    WHY this exists: every earlier stage (BM25, dense cosine, RRF, cross-encoder rerank) optimises
+    RELEVANCE ONLY, so the top-k converges on near-duplicates -- N sources making the same point.
+    A writer handed N restatements can only AGGREGATE ("[1] says X, [2] also says X"); to SYNTHESISE
+    it needs sources that cover different facets and sometimes disagree. MMR selects a set that is
+    relevant AND mutually dissimilar, which is the evidence-selection lever for that (CLAUDE.md
+    doctrine mc.2: improve at retrieval/evidence-selection, never by fine-tuning).
+
+    Canonical/protected sources are seeded into the selection first, so guardrail 5 (canonical
+    papers are protected, never penalised) still holds -- diversity never evicts a canonical paper.
+
+    Deterministic (greedy, index order breaks ties). Fail-open: if embedding is unavailable the
+    input order is preserved and only truncated, so retrieval degrades to today's behaviour.
+    """
+    if not sources or len(sources) <= top_k:
+        return sources
+
+    texts = [query] + [f"{s.title}. {s.excerpt}" for s in sources]
+    vectors = embed(texts, model=embed_model)
+    if len(vectors) != len(texts):
+        print("[research/notes] MMR embed failed; keeping rerank order", flush=True)
+        return sources[:top_k]
+    qv, dv = vectors[0], vectors[1:]
+
+    # Sim1: prefer the cross-encoder score when rerank ran -- it is already sigmoid(logit), i.e.
+    # a calibrated [0,1] relevance, commensurate with the cosine diversity term. Do NOT min-max
+    # renormalise it: that discards the calibration AND forces the weakest source to exactly 0,
+    # which makes it unselectable no matter how much new ground it covers (the diversity term can
+    # contribute at most (1 - lambda)). Fall back to query cosine only when rerank did not run.
+    raw = [getattr(s, "rerank_score", None) for s in sources]
+    if all(isinstance(r, (int, float)) for r in raw):
+        rel = [min(1.0, max(0.0, float(r))) for r in raw]
+    else:
+        rel = [max(0.0, cosine(qv, v)) for v in dv]
+
+    prot = {str(p) for p in (protected_ids or [])}
+
+    def _is_protected(s):
+        return bool(prot) and (str(getattr(s, "id", "")) in prot or str(getattr(s, "url", "")) in prot)
+
+    chosen = [i for i, s in enumerate(sources) if _is_protected(s)][:top_k]
+    remaining = [i for i in range(len(sources)) if i not in set(chosen)]
+
+    while len(chosen) < top_k and remaining:
+        best_i, best_score = None, None
+        for i in remaining:
+            redundancy = max((cosine(dv[i], dv[j]) for j in chosen), default=0.0)
+            score = lambda_ * rel[i] - (1.0 - lambda_) * redundancy
+            if best_score is None or score > best_score:
+                best_i, best_score = i, score
+        chosen.append(best_i)
+        remaining.remove(best_i)
+
+    return [sources[i] for i in chosen]
+
+
 def _best_passage(body: str, query: str, max_words: int, embed_model: str) -> str:
     """Return the ~max_words-word window of `body` whose embedding is closest to `query`.
 
