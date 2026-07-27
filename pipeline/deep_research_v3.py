@@ -573,6 +573,10 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
                     "new_concepts": result.new_concepts,
                     "quality": result.quality,
                     "cross_refs": result.cross_ref_count,
+                    # G2 is usually the axis that decides ok-vs-degraded; without persisting it the
+                    # verdict was only recoverable by grepping the run log (BAER still does), and
+                    # unrecoverable once that log was gone.
+                    "cite_precision": result.cite_precision,
                 }
                 total_w += len(result.content.split())
                 # grow the agentic evidence pool with this section's real sources (most-recent kept)

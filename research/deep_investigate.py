@@ -62,6 +62,7 @@ class SectionResult:
     citation_markers: List[str] = field(default_factory=list)
     quality: str = "ok"
     cross_ref_count: int = 0  # GATE-6: Number of cross-references to prior sections
+    cite_precision: Optional[float] = None  # G2 of the shipped round; None = never measured
 
 
 def _concept_decomposition(text: str) -> List[str]:
@@ -299,6 +300,7 @@ def investigate_section(
     best_n_cites = 0
     best_cite_markers: list = []
     best_cross_refs = 0
+    best_cite_precision = None  # G2 of the round that ships; None = never measured this section
     _best_round_tuple: tuple = (0, 0.0, 0.0, 0)  # (not_near_dup, topic, grounding, has_cites)
     _have_best = False  # first-selection sentinel; NOT `best_score==0.0` -- grounding is
                         # legitimately 0.0 on synthesized prose, which used to make every later
@@ -800,7 +802,8 @@ def investigate_section(
             g = grounding
             c = 1 if n_cites > 0 else 0
             return (nd, t, g, c)
-        if not _have_best or _round_tuple() > _best_round_tuple:
+        _selected_this_round = not _have_best or _round_tuple() > _best_round_tuple
+        if _selected_this_round:
             _have_best = True
             best_content = content
             best_score = grounding  # reporting only -- must NOT drive selection
@@ -840,6 +843,13 @@ def investigate_section(
                 print(f"  [R{round_n}] Citation integrity UNVERIFIED (fail-closed): {e}")
                 cite_precision = 0.0
 
+        # G2 is the axis that most often decides accept-vs-degraded, but it was only ever printed
+        # to the log -- state.json kept topic/cites/xrefs and NOT cite_precision, so once the log
+        # was gone the deciding number was unrecoverable. Pin it to the round that is currently
+        # the best pick (the selection block above ran before this measurement existed).
+        if _selected_this_round:
+            best_cite_precision = cite_precision
+
         # ACCEPT (clean, quality='ok') when topic + cites + cross-refs + a REAL measured
         # cite_precision all pass. Grounding is logged but is NOT a gate anymore (P0).
         gate_ok = (n_cites > 0 and topic_ok and has_min_cross_refs and not is_near_dup)
@@ -858,6 +868,7 @@ def investigate_section(
             best_n_cites = n_cites
             best_cite_markers = cite_markers
             best_cross_refs = cross_refs_found
+            best_cite_precision = cite_precision
             print(f"  [R{round_n}] ACCEPT: topic={topic_relevance:.3f}, cite_prec={cite_precision:.3f}, "
                   f"cross-refs={cross_refs_found} (grounding={grounding:.3f} advisory)")
             break
@@ -1017,4 +1028,5 @@ def investigate_section(
         citation_markers=best_cite_markers,
         quality="ok" if accepted else "degraded",
         cross_ref_count=best_cross_refs,  # GATE-6: Cross-reference count (pinned to best_content's round)
+        cite_precision=best_cite_precision,  # G2 of the shipped round -- the axis that usually decides accept
     )
