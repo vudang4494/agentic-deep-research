@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -324,11 +325,85 @@ def format_json(stats: dict, run_name: str, model: str = "") -> str:
     return json.dumps(output, indent=2)
 
 
+def _v3_stats(state: dict) -> dict:
+    """Stats for the v3 orchestrator's FLAT `sections` schema.
+
+    compute_stats() below reads the legacy v2 `passes` schema (`v["verify"]["grounding"]`,
+    crag_decision, review...). run_v3 writes `sections[key] = {quality, topic_relevance,
+    grounding, n_citations, cross_refs, content, ...}` instead, so every v3 run reported
+    'no completed sections' -- the documented measurement tool was blind to the live pipeline.
+
+    The headline signals here are the ones that are actually ENFORCED (CLAUDE.md guardrail 2):
+    `quality` (ok/degraded/BLOCKED) and G4 `topic_relevance`. Grounding is reported but labelled
+    advisory -- it is not a gate and must not be read as a quality score."""
+    secs = state.get("sections") or {}
+    rows = [v for v in secs.values() if isinstance(v, dict)]
+    q = Counter(str(v.get("quality", "?")) for v in rows)
+    topics = [float(v.get("topic_relevance", 0) or 0) for v in rows]
+    grounds = [float(v.get("grounding", 0) or 0) for v in rows]
+    words = [len((v.get("content") or "").split()) for v in rows]
+    cites = [int(v.get("n_citations", 0) or 0) for v in rows]
+    xrefs = [int(v.get("cross_refs", 0) or 0) for v in rows]
+    cps = [float(v["cite_precision"]) for v in rows if v.get("cite_precision") is not None]
+    n = len(rows) or 1
+    return {
+        "n_sections": len(rows),
+        "quality": dict(q),
+        "blocked_rate": q.get("BLOCKED", 0) / n,
+        "topic_mean": sum(topics) / n,
+        "topic_ge_050": sum(1 for t in topics if t >= 0.50) / n,
+        "grounding_mean": sum(grounds) / n,
+        "grounding_inert": len({round(g, 4) for g in grounds}) <= 1,
+        "cite_precision_mean": (sum(cps) / len(cps)) if cps else None,
+        "cite_precision_n": len(cps),
+        "words": sum(words),
+        "cites": sum(cites),
+        "sections_no_cite": sum(1 for c in cites if c == 0),
+        "xrefs": sum(xrefs),
+        "provenance": state.get("provenance") or {},
+    }
+
+
+def _format_v3(s: dict, run_name: str, topic: str) -> str:
+    L = [f"\n{'=' * 70}", f"RUN: {run_name}   (orchestrator v3)", f"topic: {topic}", "=" * 70]
+    q = s["quality"]
+    L.append(f"{'Sections':<26} {s['n_sections']}   " +
+             "  ".join(f"{k}={v}" for k, v in sorted(q.items())))
+    L.append(f"{'Blocked rate':<26} {s['blocked_rate']:.0%}   (gate refusing to fabricate = correct)")
+    L.append(f"{'Topic G4 (ENFORCED)':<26} mean {s['topic_mean']:.3f} | >=0.50: {s['topic_ge_050']:.0%}")
+    cp = s.get("cite_precision_mean")
+    L.append(f"{'Cite-precision G2':<26} " + (
+        f"mean {cp:.3f} (n={s['cite_precision_n']}) -- gate 0.45"
+        if cp is not None else "not persisted (pre-fix run; grep the log for cite_prec=)"))
+    L.append(f"{'Grounding (advisory)':<26} mean {s['grounding_mean']:.3f}" +
+             ("   [INERT: constant -- not a quality signal]" if s["grounding_inert"] else ""))
+    L.append(f"{'Words':<26} {s['words']:,}   (~{round(s['words'] / 450)} pages)")
+    L.append(f"{'Citations':<26} {s['cites']}   ({s['sections_no_cite']} section(s) with 0 cites)")
+    L.append(f"{'Cross-refs':<26} {s['xrefs']}")
+    p = s["provenance"]
+    if p:
+        models = p.get("models") or {}
+        w = (models.get("writer") or {}).get("name", "?")
+        L.append(f"{'Provenance':<26} git {str(p.get('git_sha', '?'))[:8]}"
+                 f"{'+dirty' if p.get('git_dirty') else ''} | seed {p.get('seed')} | writer {w}")
+    L.append("=" * 70)
+    return "\n".join(L)
+
+
 def report_run(run_dir: Path, format: str = "text", model: str = "") -> str:
     state = load_state(run_dir)
     run_name = run_dir.name
     if not state:
         return f"  [skip] {run_name}: no state.json found"
+
+    # v3 orchestrator writes `sections`; legacy v2 wrote `passes`. Route on the schema present.
+    if state.get("sections") and not state.get("passes"):
+        v3 = _v3_stats(state)
+        if v3["n_sections"] == 0:
+            return f"  [skip] {run_name}: no sections in state.json"
+        if format == "json":
+            return json.dumps({"run": run_name, **v3}, indent=2, ensure_ascii=False)
+        return _format_v3(v3, run_name, state.get("topic", "?"))
 
     stats = compute_stats(state)
     if stats["completed_sections"] == 0:

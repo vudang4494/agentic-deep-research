@@ -101,6 +101,16 @@ Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT
 9. **Cải thiện ở AGENTIC LOOP, KHÔNG train model.** Lever = retrieval/verify/revise-loop/prompt/evidence-selection — KHÔNG fine-tune & KHÔNG build dataset. Bottleneck (writer grounding) → verify-revise loop (feed G2 per-`[N]` verdict ngược writer), không phải weight. (Xem mục 2.)
 
 ## 7. Lệnh thường dùng
+> **Một cửa duy nhất: `agentic.py`.** Nó *delegate* sang chính các script dưới (không copy logic) và
+> **tự preflight** trước khi `run` — gọi thẳng `pipeline/deep_research_v3.py` thì KHÔNG có preflight.
+> ```bash
+> python3 agentic.py doctor                                   # ollama + 3 model (đọc từ config.py) + deps + pandoc/tectonic
+> python3 agentic.py all --topic "RLHF" --out-name rlhf_v4 --no-smoke   # run → render → report
+> python3 agentic.py verify [--static]                        # = eval/verify_all.py (gate ship)
+> python3 agentic.py render|report|dedup|outline|judge|monitor <run>
+> ```
+> Các lệnh gốc bên dưới vẫn chạy được y nguyên (agentic.py chỉ là mặt tiền).
+
 ```bash
 # Prereq (LOCAL-only → thiếu là chết giữa chừng, KHÔNG có fallback cloud)
 ollama serve &                       # bắt buộc: localhost:11434
