@@ -225,7 +225,6 @@ def investigate_section(
     writer_model: str = WRITER_MODEL,
     judge_model: str = JUDGE_MODEL,
     max_rounds: int = 3,
-    min_grounding: float = 0.70,
     min_topic_relevance: float = 0.50,
     min_cross_refs: int = 2,  # 1.2-style retry: if only 1 prior section, can accept 1 ref
     min_cite_precision: float = 0.45,  # G2: avg per-[N] citation support (local gemma verify_section); fail-open
@@ -756,7 +755,7 @@ def investigate_section(
             topic_relevance = 0.5
             topic_res = {"reason": "topic relevance failed"}
 
-        print(f"  [R{round_n}] Grounding: {grounding:.3f} (advisory; min_grounding={min_grounding} NOT enforced -- P0) in {time.time()-t_v:.1f}s")
+        print(f"  [R{round_n}] Grounding: {grounding:.3f} (HHEM, ADVISORY -- not a gate) in {time.time()-t_v:.1f}s")
         print(f"  [R{round_n}] Topic relevance: {topic_relevance:.3f}")
         print(f"  [R{round_n}] Total time: {time.time()-t_r:.1f}s")
 

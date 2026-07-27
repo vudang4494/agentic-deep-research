@@ -592,7 +592,8 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
                       + " | new_concepts=" + str(len(result.new_concepts)))
             tp_data = asdict(topic_profile) if 'topic_profile' in dir() and topic_profile else {}
             _atomic_write_text(state_path,
-                json.dumps({"topic": topic,
+                json.dumps({"schema_version": 3,  # bump when shape/gate semantics change
+                            "topic": topic,
                             "outline": asdict(outline),
                             "profile": tp_data,
                             "sections": sections,

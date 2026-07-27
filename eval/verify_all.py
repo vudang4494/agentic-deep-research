@@ -18,6 +18,7 @@ breaks one is caught here instead of three runs later:
   G. mathfix single-source -- no local re-implementation of math normalization
   H. providers well-formed -- PROVIDERS_DEFAULT holds only known provider names
   I. Ollama single-source  -- the endpoint literal lives only in research/_ollama.py
+  J. config scope          -- every config constant is read by v3, or tagged [LEGACY-ONLY]
 """
 import argparse
 import ast
@@ -296,6 +297,38 @@ def check_ollama_single_source():
            f"endpoint only in {OLLAMA_MODULE}; all callers import OLLAMA_BASE")
 
 
+# ------------------------------------------------ J. config constants are honest
+def check_config_scope():
+    """Every constant in config.py must either be READ by the v3 layer (research/ + pipeline/)
+    or be tagged [LEGACY-ONLY]. config.py used to carry v1/v2 knobs (TOP_K_DEFAULT, GROUND_UPPER,
+    FULL_TEXT_TOP_N...) that nothing in v3 consulted, so a reader tuning them expected a
+    behaviour change that could never happen -- old-code noise sitting inside the live config."""
+    src = source_of(CONFIG)
+    tree = ast.parse(src)
+    lines = src.split("\n")
+    consumers = "\n".join(
+        source_of(p) for p in py_files()
+        if p.resolve() != CONFIG.resolve() and p.name != "__init__.py"
+    )
+    stale = []
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        tgt = node.targets[0]
+        if not isinstance(tgt, ast.Name) or not tgt.id.isupper() or tgt.id == "__all__":
+            continue
+        if re.search(rf"\b{re.escape(tgt.id)}\b", consumers):
+            continue  # read by the live layer
+        # not read live -> must be explicitly scoped as legacy in the preceding comment block
+        scoped = any("LEGACY-ONLY" in lines[i] for i in range(max(0, node.lineno - 12), node.lineno))
+        if not scoped:
+            stale.append(f"{tgt.id}:{node.lineno}")
+    if stale:
+        fail("J. config scope", "constant not read by v3 and not tagged [LEGACY-ONLY]: " + ", ".join(stale[:5]))
+    else:
+        ok("J. config scope", "every config constant is either live or tagged [LEGACY-ONLY]")
+
+
 # ---------------------------------------------------------- acceptance tests
 def ollama_up():
     try:
@@ -339,7 +372,7 @@ def main():
     for fn in (check_imports, check_local_only, check_verifier_not_writer,
                check_embed_unified, check_constant_drift, check_model_literals,
                check_mathfix_single_source, check_providers,
-               check_ollama_single_source):
+               check_ollama_single_source, check_config_scope):
         try:
             fn()
         except Exception as e:  # a broken check must not masquerade as a pass
