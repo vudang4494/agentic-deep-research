@@ -325,6 +325,28 @@ def format_json(stats: dict, run_name: str, model: str = "") -> str:
     return json.dumps(output, indent=2)
 
 
+SCHEMA_VERSION = 3  # bump when state.json's shape or gate semantics change
+
+
+def run_era(state: dict) -> str:
+    """Which code generation produced this run.
+
+    Numbers are NOT comparable across eras: `quality` meant something else before G2 was
+    enforced, and `grounding` was computed differently again before that. Ranking runs from
+    different eras in one table is how a stale artifact gets quoted as current behaviour, so
+    every consumer must label the era instead of silently mixing them."""
+    if state.get("passes"):
+        return "legacy-v2"
+    secs = state.get("sections") or {}
+    if not secs:
+        return "unknown"
+    if any(isinstance(v, dict) and v.get("cite_precision") is not None for v in secs.values()):
+        return "v3+G2"          # G2 persisted -- the deciding signal is auditable
+    if state.get("provenance"):
+        return "v3+prov"        # git SHA / seed / model digests recorded
+    return "v3-early"           # pre-provenance: gate semantics unverifiable
+
+
 def _v3_stats(state: dict) -> dict:
     """Stats for the v3 orchestrator's FLAT `sections` schema.
 
@@ -364,8 +386,10 @@ def _v3_stats(state: dict) -> dict:
     }
 
 
-def _format_v3(s: dict, run_name: str, topic: str) -> str:
-    L = [f"\n{'=' * 70}", f"RUN: {run_name}   (orchestrator v3)", f"topic: {topic}", "=" * 70]
+def _format_v3(s: dict, run_name: str, topic: str, era: str = "v3") -> str:
+    L = [f"\n{'=' * 70}", f"RUN: {run_name}   [era: {era}]", f"topic: {topic}", "=" * 70]
+    if era != "v3+G2":
+        L.append("!  era cũ — số dưới đây KHÔNG so được với run mới (ngữ nghĩa gate đã đổi)")
     q = s["quality"]
     L.append(f"{'Sections':<26} {s['n_sections']}   " +
              "  ".join(f"{k}={v}" for k, v in sorted(q.items())))
@@ -401,9 +425,10 @@ def report_run(run_dir: Path, format: str = "text", model: str = "") -> str:
         v3 = _v3_stats(state)
         if v3["n_sections"] == 0:
             return f"  [skip] {run_name}: no sections in state.json"
+        era = run_era(state)
         if format == "json":
-            return json.dumps({"run": run_name, **v3}, indent=2, ensure_ascii=False)
-        return _format_v3(v3, run_name, state.get("topic", "?"))
+            return json.dumps({"run": run_name, "era": era, **v3}, indent=2, ensure_ascii=False)
+        return _format_v3(v3, run_name, state.get("topic", "?"), era)
 
     stats = compute_stats(state)
     if stats["completed_sections"] == 0:
@@ -456,26 +481,42 @@ def main():
         print()
 
         if args.compare:
-            rows = []
+            # Era-grouped. The old version ranked every run by avg_grounding, which is advisory
+            # in v3, computed differently in older eras, and empty for v3 runs -- that table was
+            # the main source of "old numbers quoted as current". Compare WITHIN an era only.
+            buckets = {}
             for run_dir in runs:
                 state = load_state(run_dir)
                 if not state:
                     continue
-                stats = compute_stats(state)
-                rows.append({
-                    "run": run_dir.name,
-                    "avg_g": stats["avg_grounding"],
-                    "min_g": stats["min_grounding"],
-                    "pass%": stats["pass_rate"],
-                    "n": stats["completed_sections"],
-                    "wc": stats["avg_wc"],
-                })
+                era = run_era(state)
+                if era == "legacy-v2":
+                    st = compute_stats(state)
+                    row = {"run": run_dir.name, "n": st["completed_sections"],
+                           "topic": None, "cp": None, "ok": None,
+                           "note": f"avg_g={st['avg_grounding']:.3f} (thang đo cũ)"}
+                else:
+                    v3 = _v3_stats(state)
+                    q = v3["quality"]
+                    row = {"run": run_dir.name, "n": v3["n_sections"],
+                           "topic": v3["topic_mean"], "cp": v3.get("cite_precision_mean"),
+                           "ok": q.get("ok", 0) / max(v3["n_sections"], 1),
+                           "note": f"blocked {v3['blocked_rate']:.0%}"}
+                buckets.setdefault(era, []).append(row)
 
-            print(f"{'Run':<30} {'Avg g':>8} {'Min g':>8} {'Pass%':>8} {'N':>5} {'Avg wc':>8}")
-            print("-" * 75)
-            for r in sorted(rows, key=lambda x: x["avg_g"], reverse=True):
-                print(f"{r['run']:<30} {r['avg_g']:>8.3f} {r['min_g']:>8.3f} "
-                      f"{r['pass%']*100:>7.1f}% {r['n']:>5} {r['wc']:>8.0f}")
+            order = ["v3+G2", "v3+prov", "v3-early", "legacy-v2", "unknown"]
+            for era in [e for e in order if e in buckets]:
+                rows = sorted(buckets[era], key=lambda r: (r["topic"] is None, -(r["topic"] or 0)))
+                print(f"\n=== era: {era}  ({len(rows)} run) ===")
+                if era != "v3+G2":
+                    print("    ! không so được với era khác — ngữ nghĩa gate đã đổi")
+                print(f"{'Run':<30} {'N':>5} {'topic G4':>9} {'cite G2':>9} {'ok%':>6}  note")
+                print("-" * 78)
+                for r in rows:
+                    t = f"{r['topic']:.3f}" if r["topic"] is not None else "     --"
+                    c = f"{r['cp']:.3f}" if r["cp"] is not None else "     --"
+                    o = f"{r['ok']*100:.0f}%" if r["ok"] is not None else "   --"
+                    print(f"{r['run']:<30} {r['n']:>5} {t:>9} {c:>9} {o:>6}  {r['note']}")
         return
 
     # Single run
