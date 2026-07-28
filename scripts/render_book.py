@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))  # so `research.mathfix` resolves when run standalone
 
 from research.mathfix import normalize_math  # canonical math/special-char normalization (single source of truth)
+from research.mdfix import normalize_markdown  # Stage-F markdown structural hygiene (single source of truth)
 
 
 def is_substantive_technical_diagram(code: str) -> bool:
@@ -103,7 +104,12 @@ def _extract_and_strip_title(content: str, default: str = "Technical Book"):
     """Pull the book title from the leading non-numbered '# ...' H1 (assemble writes it as
     '# <outline.title>') and REMOVE that line from the body. pandoc renders the title via
     \\maketitle from metadata; leaving the H1 in the body would duplicate it as an opening
-    chapter. Numbered '# N. ...' chapter headings are left intact. Returns (title, body).
+    chapter. Numbered '# N. ...' chapter headings are left intact.
+
+    The assembler writes the subtitle as a lone italic line directly under the H1. Left in the
+    body it is not a title at all -- it becomes the document's first block and prints stranded
+    at the foot of the CONTENTS page. Pull it out too and return it as metadata so it lands on
+    the title page under the title. Returns (title, subtitle, body).
     This replaces the two hardcoded, topic-mismatched title constants the render paths used."""
     lines = content.split("\n")
     for i, ln in enumerate(lines):
@@ -113,9 +119,19 @@ def _extract_and_strip_title(content: str, default: str = "Technical Book"):
         if m and not re.match(r"^\d+\.", m.group(1).strip()):
             title = m.group(1).strip()
             del lines[i]
-            return title, "\n".join(lines)
+            subtitle = ""
+            for j in range(i, min(i + 3, len(lines))):   # skip the blank line the H1 left behind
+                s = lines[j].strip()
+                if not s:
+                    continue
+                sm = re.fullmatch(r"[_*](.+?)[_*]", s)
+                if sm and "\n" not in sm.group(1):
+                    subtitle = sm.group(1).strip()
+                    del lines[j]
+                break
+            return title, subtitle, "\n".join(lines)
         break  # first non-empty line is not a title H1 -> leave body unchanged
-    return default, content
+    return default, "", content
 
 
 def clean_md(content: str, run_dir: Path = None) -> str:
@@ -127,6 +143,12 @@ def clean_md(content: str, run_dir: Path = None) -> str:
                 content = "\n".join(lines[i+1:])
                 break
     content = re.sub(r"\n---\n", "\n\n***\n\n", content)
+    # BEFORE promote_bold_headings: mdfix keys the reference block off `**References**`, which
+    # heading promotion rewrites to `### References`. Assembled books are already clean here and
+    # mdfix is idempotent, so this is a no-op for them and a repair for books written earlier.
+    content, _md = normalize_markdown(content)
+    if any(_md.values()):
+        print("  [mdfix] " + ", ".join(f"{k}={v}" for k, v in _md.items() if v))
     content = promote_bold_headings(content)
     content = normalize_math(content)
     if run_dir:
@@ -186,7 +208,8 @@ _PREAMBLE = r"""
 """
 
 
-def render_tectonic(clean_md_path: Path, output_pdf: Path, title: str = "Technical Book") -> bool:
+def render_tectonic(clean_md_path: Path, output_pdf: Path, title: str = "Technical Book",
+                    subtitle: str = "") -> bool:
     """Render via pandoc -> LaTeX -> tectonic, in TWO steps so we can pass tectonic's
     `-Z continue-on-errors`: in a 250k-word LLM-generated book a single residual TeX error
     (an undefined macro, a malformed \\frac) would otherwise abort the WHOLE render and drop us
@@ -203,7 +226,8 @@ def render_tectonic(clean_md_path: Path, output_pdf: Path, title: str = "Technic
          "-V", "documentclass=report",
          "-V", "geometry:margin=0.85in", "-V", "fontsize=10.5pt", "-V", "papersize=a4",
          "-V", "colorlinks=true", "-V", "linkcolor=accent", "-V", "urlcolor=accent",
-         "--metadata", f"title={title}"],
+         "--metadata", f"title={title}"]
+        + (["--metadata", f"subtitle={subtitle}"] if subtitle else []),
         capture_output=True, text=True,
     )
     if r1.returncode != 0:
@@ -235,13 +259,15 @@ def render_tectonic(clean_md_path: Path, output_pdf: Path, title: str = "Technic
     return False
 
 
-def render_weasy(clean_md_path: Path, output_pdf: Path, title: str = "Technical Book") -> bool:
+def render_weasy(clean_md_path: Path, output_pdf: Path, title: str = "Technical Book",
+                 subtitle: str = "") -> bool:
     """Render via pandoc --html + weasyprint."""
     html_path = output_pdf.with_suffix(".html")
     r = subprocess.run(
         ["pandoc", str(clean_md_path), "-o", str(html_path),
          "--standalone", "--toc", "--toc-depth=3", "--mathml",
-         "--metadata", f"title={title}"],
+         "--metadata", f"title={title}"]
+        + (["--metadata", f"subtitle={subtitle}"] if subtitle else []),
         capture_output=True, text=True,
     )
     if r.returncode != 0:
@@ -270,10 +296,12 @@ def main():
 
     print(f"Reading: {book_md}")
     content = book_md.read_text(encoding="utf-8")
-    title, content = _extract_and_strip_title(content)
+    title, subtitle, content = _extract_and_strip_title(content)
     wc = len(content.split())
     lines = content.count("\n") + 1
     print(f"  {wc} words, {lines} lines | title: {title}")
+    if subtitle:
+        print(f"  subtitle -> title page: {subtitle}")
 
     print("Cleaning math & rendering diagrams...")
     cleaned = clean_md(content, run_dir)
@@ -283,13 +311,13 @@ def main():
 
     if args.weasy:
         print("Rendering via weasyprint...")
-        ok = render_weasy(clean_md_out, output_pdf, title)
+        ok = render_weasy(clean_md_out, output_pdf, title, subtitle)
     else:
         print("Rendering via tectonic...")
-        ok = render_tectonic(clean_md_out, output_pdf, title)
+        ok = render_tectonic(clean_md_out, output_pdf, title, subtitle)
         if not ok:
             print("  fallback: weasyprint...")
-            ok = render_weasy(clean_md_out, output_pdf, title)
+            ok = render_weasy(clean_md_out, output_pdf, title, subtitle)
 
     if ok:
         sz = output_pdf.stat().st_size
