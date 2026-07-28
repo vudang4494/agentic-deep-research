@@ -15,7 +15,7 @@ breaks one is caught here instead of three runs later:
   D. embed unified         -- bge-m3 everywhere, zero live nomic references
   E. no constant drift     -- a constant defined in two modules with two values
   F. no model literals     -- model names live in config.py, not sprinkled at call sites
-  G. mathfix single-source -- no local re-implementation of math normalization
+  G. Stage-F single-source -- no local re-implementation of mathfix/mdfix normalizers
   H. providers well-formed -- PROVIDERS_DEFAULT holds only known provider names
   I. Ollama single-source  -- the endpoint literal lives only in research/_ollama.py
   J. config scope          -- every config constant is read by v3, or tagged [LEGACY-ONLY]
@@ -50,6 +50,7 @@ ACCEPTANCE = [
     ("eval/test_outline_enforce.py", "outline anti-matrix enforcement", False),
     ("eval/test_decite.py", "intra-book citation cleaner", False),
     ("eval/test_dedup_sentences.py", "assemble-time sentence dedup", False),
+    ("eval/test_mdfix.py", "markdown structural hygiene", False),
     ("eval/test_mmr_diversity.py", "MMR evidence diversity", False),
     ("eval/test_math_char_safety.py", "math/special-char safety", False),
     # NOT here: test_citation_graph.py (guards an UNWIRED module; vacuous without a network
@@ -233,31 +234,37 @@ def check_model_literals():
         ok("F. model literals", "model names only in config.py")
 
 
-# ------------------------------------------------------ G. mathfix single-source
-def check_mathfix_single_source():
-    mathfix = ROOT / "research" / "mathfix.py"
-    if not mathfix.exists():
-        warn("G. mathfix single-source", "research/mathfix.py missing -- skipped")
-        return
-    fns = set()
-    for node in ast.parse(source_of(mathfix)).body:
-        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
-            fns.add(node.name)
-    clones = []
-    for p in py_files():
-        if p.resolve() == mathfix.resolve():
+# ----------------------------------------------- G. Stage-F normalizers single-source
+def check_normalizer_single_source():
+    """Every Stage-F text normalizer lives in exactly ONE module. Both the assembler and the
+    renderer clean the same markdown, so a local re-implementation on either side drifts and
+    the book stops matching the PDF -- the exact failure mathfix was consolidated to prevent."""
+    missing, checked, clones = [], 0, []
+    for name in ("mathfix", "mdfix"):
+        mod = ROOT / "research" / f"{name}.py"
+        if not mod.exists():
+            missing.append(f"research/{name}.py")
             continue
-        try:
-            tree = ast.parse(source_of(p))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name in fns:
-                clones.append(f"{rel(p)}::{node.name}")
+        fns = {node.name for node in ast.parse(source_of(mod)).body
+               if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")}
+        checked += len(fns)
+        for p in py_files():
+            if p.resolve() == mod.resolve():
+                continue
+            try:
+                tree = ast.parse(source_of(p))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name in fns:
+                    clones.append(f"{rel(p)}::{node.name}")
+    if missing:
+        warn("G. Stage-F single-source", f"missing: {', '.join(missing)} -- skipped")
     if clones:
-        fail("G. mathfix single-source", "local copy of math normalization: " + ", ".join(clones[:3]))
-    else:
-        ok("G. mathfix single-source", f"{len(fns)} public fns, no local re-implementations")
+        fail("G. Stage-F single-source", "local copy of a normalizer: " + ", ".join(clones[:3]))
+    elif not missing:
+        ok("G. Stage-F single-source",
+           f"mathfix+mdfix: {checked} public fns, no local re-implementations")
 
 
 # --------------------------------------------------------------- H. providers
@@ -372,7 +379,7 @@ def main():
 
     for fn in (check_imports, check_local_only, check_verifier_not_writer,
                check_embed_unified, check_constant_drift, check_model_literals,
-               check_mathfix_single_source, check_providers,
+               check_normalizer_single_source, check_providers,
                check_ollama_single_source, check_config_scope):
         try:
             fn()

@@ -59,6 +59,7 @@ from research.deep_investigate import investigate_section
 from research.mathfix import normalize_math  # canonical math/special-char normalization (single source of truth)
 from research.decite import clean_intrabook_citations  # Stage-F intra-book citation cleaner (single source of truth)
 from research.dedup import drop_duplicate_sentences  # Stage-F exact-duplicate sentence remover (deletion-only)
+from research.mdfix import normalize_markdown  # Stage-F markdown structural hygiene (single source of truth)
 
 # Constants shared with research layer
 try:
@@ -158,6 +159,11 @@ def _sanitize_section_content(content: str, title_set=None) -> str:
     cleaned = re.sub(r"^###\s+(.+)$", r"**\1**", cleaned, flags=re.MULTILINE)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
+    # Stage F structural hygiene: repair markdown the writer emitted in a shape that PARSES
+    # wrong (a list glued to the paragraph above it collapses into prose, `[[N]]` prints
+    # doubled, a `[N]` trailing a `$$` line orphans into its own paragraph). Formatting-only
+    # and idempotent -- the renderer applies the same module to older books.
+    cleaned, _mdfix_counts = normalize_markdown(cleaned)
     # normalize display math before returning (tectonic safety net)
     cleaned = normalize_math(cleaned)
     return cleaned.strip()
@@ -201,7 +207,12 @@ def _section_references(content: str, srcs: list) -> list:
         auth = _ref_safe(", ".join(auth[:2]) if isinstance(auth, list) else auth)
         year = re.sub(r"[^0-9]", "", str(g(s, "year")))[:4]
         url = re.sub(r"\s", "", str(g(s, "url")))
-        line = f"{n}. {title}"
+        # `- [N] ...`, NOT `N. ...`: only the sources actually cited appear, so the numbering is
+        # legitimately gapped (1, 3, 4) -- and a markdown ORDERED list renumbers it to 1, 2, 3 on
+        # render, leaving the prose citing [3] while the printed entry reads "2.". A bullet with a
+        # literal `[N]` marker keeps the number the prose refers to. `mdfix.fix_reference_numbering`
+        # migrates books assembled before this.
+        line = f"- [{n}] {title}"
         if auth:
             line += f" — {auth}"
         if year:

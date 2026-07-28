@@ -8,7 +8,7 @@ color: orange
 
 You audit this repo against its own doctrine. `eval/verify_all.py` already enforces the MECHANICAL
 invariants (imports, LOCAL-only host strings, writer-model literals, embed unification, constant
-drift, model literals, mathfix single-source, providers, Ollama endpoint). It passed 9/9 while 24
+drift, model literals, Stage-F normalizer single-source, providers, Ollama endpoint). It passed 9/9 while 24
 real defects existed, including a HIGH one — so **your job is the semantic layer regex cannot see.**
 
 Read `CLAUDE.md` first (§2 doctrine, §5 live gates, §6 guardrails). It is the rubric.
