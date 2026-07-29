@@ -84,6 +84,10 @@ _TAVILY_FAILURE_THRESHOLD = 3
 # direct API for the session and route academic queries through Tavily instead --
 # Tavily(include_domains=arxiv.org) is far more reliable. (User-requested 2026-06.)
 ARXIV_READ_TIMEOUT = 7.0
+# Canonical id_list lookup runs a handful of times per run, not once per query, so it can
+# wait where the keyword-search loop cannot. 7s was tuned to keep search snappy and it
+# silently killed P0b whenever export.arxiv.org got slow.
+ARXIV_ID_READ_TIMEOUT = 25.0
 _ARXIV_TIMEOUT_COUNT = 0
 _ARXIV_TIMEOUT_THRESHOLD = 3
 # Codes that indicate a recurring/retryable error (not transient).
@@ -145,7 +149,7 @@ def _arxiv_title_query(q: str) -> str:
     return " ".join(tokens[:4])
 
 
-def _arxiv_raw_query_params(extra: dict) -> List[Source]:
+def _arxiv_raw_query_params(extra: dict, read_timeout: float = None) -> List[Source]:
     """Single arxiv API call with arbitrary params (search_query OR id_list)."""
     global _LAST_ARXIV_CALL, _ARXIV_TIMEOUT_COUNT, _ARXIV_AVAILABLE
     if not _ARXIV_AVAILABLE:
@@ -163,7 +167,7 @@ def _arxiv_raw_query_params(extra: dict) -> List[Source]:
     base.update(extra)
     params = urllib.parse.urlencode(base)
     url = f"{ARXIV_API}?{params}"
-    rec = fetch(url, accept="application/atom+xml", timeout=ARXIV_READ_TIMEOUT)
+    rec = fetch(url, accept="application/atom+xml", timeout=read_timeout or ARXIV_READ_TIMEOUT)
     if not rec or rec.get("status", 0) >= 400 or not rec.get("content"):
         # Count read-timeouts/failures; after a few, auto-disable the flaky direct
         # API for the session so arxiv_search falls back to Tavily (no more 7s stalls).
@@ -220,21 +224,65 @@ def _arxiv_raw_query(search_query: str, k: int) -> List[Source]:
     return _arxiv_raw_query_params({"search_query": search_query, "max_results": k})
 
 
-def arxiv_by_id(arxiv_ids) -> List[Source]:
-    """Fetch specific arxiv papers by id (Rank5 canonical-seed retrieval).
+def _arxiv_by_id_via_tavily(ids: List[str]) -> List[Source]:
+    """Last-resort canonical lookup: find each arxiv id through Tavily(arxiv.org).
 
-    Uses the arxiv API id_list param so a named canonical paper is retrieved
-    directly instead of hoping a keyword search surfaces it.
-    If arxiv.org is unreachable, returns an empty list."""
-    if not _ARXIV_AVAILABLE:
-        return []
+    Only hits whose URL actually contains the id are kept, so this cannot silently
+    substitute a different paper for a canonical one -- a wrong canonical is worse than
+    a missing one (it would be P0c-EXEMPT and prefilter-exempt while being off-target).
+    """
+    out: List[Source] = []
+    for i in ids:
+        try:
+            hits = tavily_search(f"arxiv.org/abs/{i}", k=3, include_domains=["arxiv.org"])
+        except Exception:
+            continue
+        for s in hits:
+            if i in (getattr(s, "url", "") or "") or i in (getattr(s, "id", "") or ""):
+                try:
+                    s.provider = "arxiv"
+                except Exception:
+                    pass
+                out.append(s)
+                break
+    return out
+
+
+def arxiv_by_id(arxiv_ids) -> List[Source]:
+    """Fetch specific canonical arxiv papers by id (P0b canonical-seed injection).
+
+    Robustness matters more here than anywhere else in retrieval: canonical sources are
+    prefilter-exempt and P0c-EXEMPT (Guardrail 5), so when this returns empty the run
+    silently loses ALL canonical protection and only a log line records it. That is exactly
+    what a flaky export.arxiv.org window used to cause -- `arxiv_search` degrades to Tavily
+    on timeout, but this function had no fallback at all and just returned [].
+
+    Three defences, cheapest first:
+      1. a wider read timeout than keyword search (this runs a handful of times per run,
+         not per query, so it can afford to wait where a search loop cannot);
+      2. one retry, since the observed failure is a transient timeout / 429;
+      3. Tavily(arxiv.org) by id -- and it is used even when the direct API has been
+         auto-disabled, which previously short-circuited straight to [].
+    """
     # Strip "arxiv:" prefix and "vN" version suffix from IDs
     ids = [re.sub(r"^arxiv:", "", str(i).strip()) for i in (arxiv_ids or []) if i]
     ids = [re.sub(r"v\d+$", "", i) for i in ids]
     ids = [i for i in ids if i]
     if not ids:
         return []
-    return _arxiv_raw_query_params({"id_list": ",".join(ids), "max_results": len(ids)})
+    params = {"id_list": ",".join(ids), "max_results": len(ids)}
+    if _ARXIV_AVAILABLE:
+        for attempt in (1, 2):
+            hits = _arxiv_raw_query_params(params, read_timeout=ARXIV_ID_READ_TIMEOUT)
+            if hits:
+                return hits
+            if attempt == 1:
+                print(f"[search] arxiv_by_id: no result for {len(ids)} canonical id(s) "
+                      f"-- one retry", flush=True)
+    hits = _arxiv_by_id_via_tavily(ids)
+    print(f"[search] arxiv_by_id: direct API empty -> Tavily(arxiv.org) recovered "
+          f"{len(hits)}/{len(ids)} canonical paper(s)", flush=True)
+    return hits
 
 
 def _arxiv_via_tavily(query: str, k: int = 3) -> List[Source]:

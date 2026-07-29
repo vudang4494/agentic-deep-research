@@ -1,7 +1,7 @@
 """Dedup, rank, and format research sources into an EVIDENCE block for the writer."""
 import math
 import re
-from typing import List
+from typing import Iterable, List, Optional
 from urllib.parse import urlparse
 
 from .embeddings import embed, cosine
@@ -438,9 +438,69 @@ def _best_passage(body: str, query: str, max_words: int, embed_model: str) -> st
     return windows[0]  # head fallback
 
 
+# Traces of a DERIVATION rather than of a claim: an equation, math notation, a symbol being
+# defined, or an ordered step. Deliberately mixed LaTeX/unicode/plain -- fetched bodies arrive
+# in all three shapes depending on whether the source was arxiv HTML, a PDF or a web page.
+_DERIV_MARKERS = re.compile(
+    r"\\(?:frac|sum|prod|int|nabla|mathbb|mathcal|log|exp|sigma|theta|pi|beta|alpha|left|right)\b"
+    r"|[α-ωΑ-Ω∑∫∇√≤≥≈∈⊂∀∃]"
+    r"|\w\s*=\s*[^\s=]"
+    r"|\b(?:where|let|with)\b[^.]{0,60}?\b(?:denotes?|is defined as|represents?)\b"
+    r"|^\s*(?:\d{1,2}[.)]\s|Step\s+\d)",
+    re.I | re.M,   # M must be a compile flag: an inline (?m) mid-pattern is a PatternError
+)
+
+
+def normalize_source_id(x) -> str:
+    """Canonical-id match key: drop the `arxiv:` prefix and the `vN` version suffix.
+
+    Single source of truth for this comparison. The same paper reaches the pipeline as
+    `arxiv:2203.02155v1` (canonical seed), `2203.02155` (user flag) and `arxiv:2203.02155v3`
+    (a later search hit), so any exact-string match silently fails to recognise a protected
+    source -- which costs it prefilter/P0c exemption AND its derivation excerpt, with no error.
+    """
+    s = re.sub(r"^arxiv:", "", str(x or "").strip())
+    return re.sub(r"v\d+$", "", s)
+
+
+def _derivation_passage(body: str, max_words: int) -> str:
+    """Return the contiguous window of `body` with the highest DERIVATION density.
+
+    Why this exists, and why it is NOT `_best_passage`: that one picks the window closest to
+    what the writer is about to claim, which maximises attributability -- it finds the sentence
+    that states the fact. A derivation is not a sentence; it is several contiguous pages of
+    equations, symbol definitions and steps. Optimising for claim-proximity structurally selects
+    AGAINST the long contiguous passage a derivation lives in, so a section can be perfectly
+    cited and still teach nothing. For canonical/protected papers we want the METHOD section,
+    so score windows by how much math and how many defined symbols they carry, not by how well
+    they match the claim. Falls back to the head window when nothing scores.
+    """
+    words = body.split()
+    if len(words) <= max_words:
+        return body
+    step = max(1, max_words // 2)
+    best, best_score = None, -1.0
+    start = 0
+    while start < len(words):
+        w = words[start:start + max_words]
+        if start > 0 and len(w) < max(40, max_words // 4):
+            break
+        chunk = " ".join(w)
+        # density, not raw count -- a long window must not win merely by being long
+        score = len(_DERIV_MARKERS.findall(chunk)) / max(len(w), 1)
+        if score > best_score:
+            best, best_score = chunk, score
+        if start + max_words >= len(words):
+            break
+        start += step
+    return best if best is not None else " ".join(words[:max_words])
+
+
 def enrich_top_sources(sources: List[Source], top_n: int = 2,
                        max_words_per: int = 350, section_prompt: str = None,
-                       embed_model: str = EMBED_MODEL) -> List[Source]:
+                       embed_model: str = EMBED_MODEL,
+                       protected_ids: Optional[Iterable[str]] = None,
+                       canonical_max_words: int = 0) -> List[Source]:
     """Fetch full text for the top-N highest-relevance sources and replace their
     short search excerpt with a longer extracted body (up to max_words_per).
 
@@ -459,20 +519,34 @@ def enrich_top_sources(sources: List[Source], top_n: int = 2,
     """
     if not sources:
         return sources
+    # Normalised match: `arxiv:2203.02155v1` and `2203.02155` are the same paper (see
+    # normalize_source_id). An exact-string match here silently never fires.
+    prot = {normalize_source_id(p) for p in (protected_ids or []) if p}
+    cano_words = canonical_max_words or max_words_per
     for s in sources[:top_n]:
+        is_canonical = bool(prot) and (
+            normalize_source_id(getattr(s, "id", "")) in prot
+            or normalize_source_id(getattr(s, "url", "")) in prot)
+        keep_words = cano_words if is_canonical else max_words_per
         try:
-            # Fetch MORE than we keep so claim-aware selection has material to choose from.
-            fetch_words = max(max_words_per * 4, 1600) if section_prompt else max_words_per
+            # Fetch MORE than we keep so passage selection has material to choose from.
+            fetch_words = max(keep_words * 4, 1600) if section_prompt else keep_words
             body = fetch_full_text(s.url, max_words=fetch_words)
         except Exception as e:
             print(f"[research/notes] enrich failed for {s.url}: {e}", flush=True)
             body = ""
         if not body:
             continue
-        if section_prompt:
-            body = _best_passage(body, section_prompt, max_words_per, embed_model)
+        if is_canonical:
+            # Canonical papers are the only place a real derivation exists. Take the
+            # method section (densest math), not the window nearest the claim.
+            body = _derivation_passage(body, keep_words)
+            print(f"[research/notes] canonical derivation-window ({len(body.split())}w) "
+                  f"for {getattr(s, 'id', s.url)[:48]}", flush=True)
+        elif section_prompt:
+            body = _best_passage(body, section_prompt, keep_words, embed_model)
         else:
-            body = " ".join(body.split()[:max_words_per])
+            body = " ".join(body.split()[:keep_words])
         if body and len(body) > len(s.excerpt or ""):
             s.excerpt = body
     return sources
