@@ -288,6 +288,20 @@ def investigate_section(
 
     # P0b: force-fetch canonical papers directly so they survive in ranked results
     # even when search queries miss them. These bypass the normal search pipeline.
+    #
+    # TRIED AND REVERTED -- per-section relevance filtering of this set. The motivating symptom
+    # is real: an adversarial-robustness section shipped a bibliography citing "Attention Is All
+    # You Need", and because canonical is prefilter- and P0c-exempt it OCCUPIES a slot rather
+    # than competing for one -- costly, since sections routinely ship only 3 sources.
+    # The filter (bge-m3 cosine of each canonical against the section retrieval_query, keep
+    # everything within 0.82 of the best) looked well-separated when calibrated over the
+    # 4-paper book-global set. Replayed against the 86-section artifact it FAILED: of 5 papers
+    # it dropped, 4 were ones the writer had actually CITED, and 3 sections fell below
+    # `_evidence_adequate` (7.1 went 3 -> 1 source), i.e. it would have created BLOCKED stubs.
+    # Cause: the ratio was tuned on 4 candidates but only 2-3 canonicals survive retrieval into
+    # any real section, and with 2 candidates the rule discards half the evidence.
+    # Do not retry on a ratio/top-K rule over the SHIPPED set. Any future attempt must be
+    # replayed against a finished run BEFORE shipping -- a unit test cannot see this.
     canonical_forced: List[Source] = []
     if protected_source_ids:
         raw_ids = list(protected_source_ids)

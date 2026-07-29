@@ -60,6 +60,7 @@ from research.mathfix import normalize_math  # canonical math/special-char norma
 from research.decite import clean_intrabook_citations  # Stage-F intra-book citation cleaner (single source of truth)
 from research.dedup import drop_duplicate_sentences  # Stage-F exact-duplicate sentence remover (deletion-only)
 from research.mdfix import normalize_markdown  # Stage-F markdown structural hygiene (single source of truth)
+from research.search import _canonical_url  # URL identity + redirect unwrap (single source of truth)
 
 # Constants shared with research layer
 try:
@@ -191,6 +192,22 @@ def _ref_safe(s: str) -> str:
     return re.sub(r"\s{2,}", " ", s).strip()
 
 
+def _section_sort_key(key: str) -> tuple:
+    """Order section keys "1.1" ... "12.8" NUMERICALLY.
+
+    Plain `sorted()` is lexicographic, so "10.1" sorts before "2.1" and the tail of the list
+    stops being the most recently written sections. That matters because `investigate_section`
+    reads ONLY `prior_sections[-2:]` for its continuation context and `[-5:]` for the cross-ref
+    hint: from chapter 10 onward the writer was being handed chapter 9's material as "what came
+    just before". Verified -- while writing 12.1 the last two entries were 9.7, 9.8 instead of
+    11.7, 11.8. Non-numeric keys sort last rather than raising.
+    """
+    try:
+        return (0,) + tuple(int(p) for p in str(key).split("."))
+    except (ValueError, AttributeError):
+        return (1, str(key))
+
+
 def _section_references(content: str, srcs: list) -> list:
     """Resolve the inline [N] citation markers into a compact per-section reference list so the
     raw tags are no longer dangling (Reader feedback). Deterministic -- no LLM editor needed."""
@@ -206,7 +223,12 @@ def _section_references(content: str, srcs: list) -> list:
         auth = g(s, "authors")
         auth = _ref_safe(", ".join(auth[:2]) if isinstance(auth, list) else auth)
         year = re.sub(r"[^0-9]", "", str(g(s, "year")))[:4]
-        url = re.sub(r"\s", "", str(g(s, "url")))
+        # Canonicalize at emit time too, NOT just at gather time. This function reads the
+        # already-serialized `sources` out of state.json, so a run written before the redirect
+        # unwrap landed still holds `duckduckgo.com/l?uddg=<real-url>` -- re-running the same
+        # --out-name skips Stage 2 and re-assembles, repairing the bibliography without
+        # regenerating a single section. Imported, never re-implemented (single source).
+        url = _canonical_url(re.sub(r"\s", "", str(g(s, "url"))))
         # `- [N] ...`, NOT `N. ...`: only the sources actually cited appear, so the numbering is
         # legitimately gapped (1, 3, 4) -- and a markdown ORDERED list renumbers it to 1, 2, 3 on
         # render, leaving the prose citing [3] while the printed entry reads "2.". A bullet with a
@@ -532,7 +554,7 @@ def run_v3(topic, out_name=None, n_chapters=None, sections_per_chapter=None,
                     ),
                     prior_sections=[
                         {"title": sections[k].get("title", k), "content": sections[k].get("content", "")}
-                        for k in sorted(sections.keys())
+                        for k in sorted(sections.keys(), key=_section_sort_key)
                     ],
                     prior_concepts=prior_concepts,
                     providers=_providers,
