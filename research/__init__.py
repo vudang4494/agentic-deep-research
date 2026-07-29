@@ -32,7 +32,7 @@ from .config import (
 )
 from . import (
     search, query_gen, query_router, notes, embeddings,
-    fetch, verify, planner, canonical_seeds,
+    fetch, verify, canonical_seeds,
 )  # noqa: F401
 
 try:
@@ -47,7 +47,7 @@ except ImportError:
 __all__ = [
     "Source", "Query",
     "search", "query_gen", "query_router", "notes", "embeddings",
-    "fetch", "verify", "planner", "canonical_seeds",
+    "fetch", "verify", "canonical_seeds",
     "rerank", "faithfulness",
     "VFY_V2_AVAILABLE",
     "PROVIDERS_DEFAULT", "PRIMARY_FLOOR",

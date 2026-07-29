@@ -28,6 +28,23 @@ from . import explain as _explain
 
 TIMEOUT = 300.0
 
+# Excerpt budget for CANONICAL (protected) sources. Deliberately ~4x the 550w general budget:
+# a derivation spans pages, so the general window -- which is chosen for proximity to the claim
+# the writer is about to make -- reliably cuts one in half. Everything upstream of the writer
+# optimises attributability; this is the one place that optimises for the mechanism being
+# derivable at all. Canonical sources only, so the evidence block does not balloon.
+#
+# MEASURED TRADE-OFF, not a free win (RLHF, 70 sections vs a 16-section baseline -- different
+# section sets and max_rounds, so indicative rather than a clean A/B):
+#     explanation_depth  0.503 -> 0.599      cite_precision  0.385 -> 0.345
+#   section 1.3, the one like-for-like comparison, went 543w/expl 0.50/cp 0.46 `ok`
+#                                              ->   1045w/expl 0.68/cp 0.31 `degraded`.
+# The book teaches more and attributes less, and more sections carry the `degraded` label --
+# which does NOT drop them (only BLOCKED sections are dropped from the book). Kept because
+# teaching the mechanism is the product goal; set back to 550 to restore the old behaviour
+# exactly, and re-measure before changing it again.
+_CANONICAL_EXCERPT_WORDS = 2200
+
 # Import research layer components
 import sys as _sys
 from pathlib import Path
@@ -483,12 +500,7 @@ def investigate_section(
         # RRF+RRK may miss canonical papers (low relevance score), so we force-inject them.
         # Deduplicate by normalized ID so we don't double-count.
         if canonical_forced and protected_source_ids:
-            def _norm(x):
-                x = str(x or "").strip()
-                x = re.sub(r"^arxiv:", "", x)
-                x = re.sub(r"v\d+$", "", x)
-                return x
-
+            _norm = _notes.normalize_source_id   # single source -- see notes.normalize_source_id
             ranked_ids_normed = {_norm(getattr(s, "id", "") or getattr(s, "url", "")) for s in ranked}
             to_add = []
             for s in canonical_forced:
@@ -531,8 +543,12 @@ def investigate_section(
         # #2 EVIDENCE DEPTH: pull more full-text from MORE sources so the writer actually
         # sees the papers' methods/equations to reproduce (was top-2 @ 350w -> too thin for
         # formulas/algorithms). Adds info, never removes.
+        # Canonical sources get a BIGGER, derivation-dense contiguous window (a derivation spans
+        # pages; a 550w claim-nearest window cuts it in half). Non-canonical keep claim-aware.
         ranked = _notes.enrich_top_sources(ranked, top_n=4, max_words_per=550,
-                                           section_prompt=section_prompt, embed_model=embed_model)
+                                           section_prompt=section_prompt, embed_model=embed_model,
+                                           protected_ids=protected_source_ids,
+                                           canonical_max_words=_CANONICAL_EXCERPT_WORDS)
         evidence_ok, evidence_reason = _evidence_adequate(spec, ranked)
 
         if not evidence_ok:
@@ -857,7 +873,19 @@ def investigate_section(
         # to the log -- state.json kept topic/cites/xrefs and NOT cite_precision, so once the log
         # was gone the deciding number was unrecoverable. Pin it to the round that is currently
         # the best pick (the selection block above ran before this measurement existed).
+        # TRIED AND REVERTED -- do not re-implement without new evidence:
+        #  1. A CitationAgent re-attachment pass (low G2 assumed to mean "right source in the
+        #     pool, wrong sentence"). 95 invocations on a 70-section run moved markers 35 times
+        #     for a mean G2 delta of +0.028 (20 better / 14 worse) -- noise against the ~0.10
+        #     needed to reach the gate. Mis-attachment is NOT why cite_precision is low.
+        #  2. Judging G2 per CLAIM instead of per marker (union of the cited sources, and
+        #     exempting derivational sentences). Re-scored on 66 real sections it came out
+        #     STRICTER, not looser: mean 0.352 -> 0.323, 3 fewer sections passing.
+        # Both were aimed at the synthesis penalty; neither relieved it. The penalty appears to
+        # be intrinsic to scoring prose against retrieved excerpts, not an artifact of the unit.
+
         if _selected_this_round:
+            best_content = content          # repair may have changed the markers
             best_cite_precision = cite_precision
 
         # ACCEPT (clean, quality='ok') when topic + cites + cross-refs + a REAL measured
@@ -923,6 +951,10 @@ def investigate_section(
             # hand back THIS draft + the per-[N] verdicts so the writer repairs the flagged
             # citations in place instead of regenerating. (If topic/cross-ref/dup also failed,
             # leave revise empty so the next round re-researches normally.)
+            # Writer-side revise is now the SECOND resort: CiteAgent already tried the
+            # attachment-only repair above. Arm it only when re-attachment could not close the
+            # gap, so the "restate the claim to match its source" instruction -- which trades
+            # synthesis for attributability -- stops being the routine response to a G2 miss.
             if (cite_precision is not None and cite_precision < min_cite_precision
                     and topic_ok and not is_near_dup
                     and (not prior_sections or cross_refs_found >= min_refs_needed)
@@ -931,7 +963,8 @@ def investigate_section(
                     f"  [{v.get('n')}] verdict={v.get('verdict')}: claim=\"{(v.get('claim') or '')[:100]}\" | reason: {(v.get('reason') or '')[:120]}"
                     for v in _bad_cites[:12])
                 revise_draft = content
-                print(f"  [R{round_n}] verify-revise armed: {len(_bad_cites)} citation(s) to repair next round")
+                print(f"  [R{round_n}] verify-revise armed (re-attachment did not close the gap): "
+                      f"{len(_bad_cites)} citation(s) to repair next round")
 
         # RULES Stage D: min word count >= 120 hard rule
         # Sections shorter than 120 words are "garbage" (rlhf_v3-style 143w sections)
