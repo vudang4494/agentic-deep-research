@@ -11,6 +11,7 @@ Providers:
   - ddg       : DuckDuckGo HTML scrape                             -- OFF by default
 """
 import hashlib
+import html
 import json as _json
 import os
 import re
@@ -34,16 +35,58 @@ BRAVE_API = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_TIMEOUT = 20.0
 
 
+_REDIRECT_WRAPPERS = (
+    ("duckduckgo.com", "uddg"),      # //duckduckgo.com/l/?uddg=<target>&rut=<hash>
+    ("google.com", "url"),           # /url?q=<target>
+    ("bing.com", "u"),               # /ck/a?...&u=<target>
+)
+
+
+def _unwrap_redirect(u: str) -> str:
+    """Return the real target hiding inside a search-engine redirect wrapper.
+
+    `ddg_search` scrapes HTML and keeps the href verbatim, which for DuckDuckGo is a
+    redirect: `//duckduckgo.com/l/?uddg=<percent-encoded-target>&amp;rut=<hash>`. Left
+    alone it reaches the printed bibliography, so a reader clicking a citation lands on
+    DuckDuckGo instead of the paper -- one observed case wrapped a real arxiv.org/abs URL.
+    That breaks the one property the book sells: a citation you can check.
+
+    Unwrapping HERE rather than in `ddg_search` is deliberate -- `_canonical_url` is the
+    single funnel every provider's URL passes through (`_url_id` and `gather` both call
+    it), so the stored url, the dedup id, the writer's evidence pack and the reference
+    line are all fixed by one edit. Returns the input unchanged if anything is off; the
+    caller treats a bad unwrap as "not a wrapper", never as an error.
+    """
+    try:
+        low = u.lower()
+        for host, param in _REDIRECT_WRAPPERS:
+            if host not in low:
+                continue
+            # `&amp;` survives the HTML scrape, so unescape BEFORE parsing or the
+            # query keys come out as `amp;rut` and the target is missed.
+            q = urllib.parse.urlsplit(html.unescape(u)).query
+            for k, v in urllib.parse.parse_qsl(q, keep_blank_values=False):
+                if k.lower() == param and v.lower().startswith(("http://", "https://")):
+                    return v
+        return u
+    except Exception:
+        return u
+
+
 def _canonical_url(url: str) -> str:
     """Topic-agnostic URL canonicalizer (no model, no network) so the SAME page
     surfaced by different providers OR different rounds collapses to one identity.
-    Unifies arxiv abs/pdf/html + version suffix, wikipedia slug host, and strips
-    tracking params / fragment / trailing slash. Returns input unchanged on any
-    parse failure (never raises). Used for de-dup and P0c seen-counting."""
+    Unwraps search-engine redirects, unifies arxiv abs/pdf/html + version suffix,
+    wikipedia slug host, and strips tracking params / fragment / trailing slash.
+    Returns input unchanged on any parse failure (never raises). Used for de-dup
+    and P0c seen-counting."""
     try:
         u = (url or "").strip()
         if not u:
             return url
+        # BEFORE anything else: a wrapper's own host/path would otherwise become the
+        # canonical identity, and the arxiv rule below would miss a wrapped arxiv link.
+        u = _unwrap_redirect(u)
         # arxiv: /abs/<id>, /pdf/<id>(vN)(.pdf), /html/<id> -> one canonical abs (version stripped)
         m = re.search(r"arxiv\.org/(?:abs|pdf|html)/([0-9]{4}\.[0-9]{4,5}|[a-z\-]+/[0-9]{7})", u, re.I)
         if m:
