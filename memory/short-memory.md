@@ -1,33 +1,42 @@
 # Short Memory — snapshot trạng thái HIỆN TẠI
 
-> **Chỉ snapshot hiện tại (≤50 dòng). KHÔNG changelog · KHÔNG số đo một lần · KHÔNG số dòng code.**
+> **Chỉ snapshot hiện tại (≤50 dòng). KHÔNG changelog · KHÔNG số dòng code.**
 > Lịch sử & quyết định → `long-memory.md`. Roadmap → `docs/plan.md`. Pipeline & ngưỡng → `CLAUDE.md` (§3/§5), cuối cùng là **CODE**.
 > Thứ tự đọc: `docs/GLOSSARY.md` → file này → `CLAUDE.md`.
 
 ## Base đang chạy
-- **Orchestrator DUY NHẤT:** `pipeline/deep_research_v3.py` + stage logic `research/*.py`. Launcher `./run_full.sh`. **Resume tự động** qua `output/runs/<name>/state.json` (không có flag — cùng `--out-name` = resume).
-- **Legacy — KHÔNG phải base, đừng sửa như live:** `legacy/deep_research.py` (v2; còn bị `tools/monitor.py` / `eval/run_eval.py` import). v1 đã retire.
-- **100% model LOCAL:** `gemma4:e4b` (discovery/outline/QGN/judge) · `qwen3.6-35b:iq3` (writer) · `bge-m3:latest` (embed, UNIFIED mọi path) · `bge-reranker-v2-m3` · HHEM. **Không gọi Claude/external model lúc runtime** (search provider ngoài như brave/tavily thì được — LOCAL-only nói về *model inference*).
-- **Verifier ≠ Writer** (bất biến): grounding = HHEM · topic/cite = gemma · writer = Qwen.
+- **Orchestrator DUY NHẤT:** `pipeline/deep_research_v3.py` + stage logic `research/*.py`. Launcher `./run_full.sh`, mặt tiền `agentic.py`. **Resume tự động** qua `output/runs/<name>/state.json` (cùng `--out-name` = resume; không có flag).
+- **Legacy — đừng sửa như live:** `legacy/deep_research.py` (v2). `research/planner.py` đã **XOÁ** (v3 chưa bao giờ import).
+- **100% model LOCAL:** `gemma4:e4b` (discovery/outline/QGN/judge) · `qwen3.6-35b:iq3` (writer) · `bge-m3:latest` (embed) · `bge-reranker-v2-m3` · HHEM. **Verifier ≠ Writer** (bất biến).
+- Cổng ship: `python3 eval/verify_all.py` — hiện **17/17** (10 static A–J + 7 acceptance).
 
-## Gate đang sống (giá trị cụ thể → `CLAUDE.md §5` → grep code)
-- **Cứng:** P0a domain-evidence (PRE-writer) · **G2** cite_precision · **G4** topic · StageD word-count/cross-ref · empty-pool.
-- **Advisory:** **G3** grounding (HHEM) — log-only, đã bỏ khỏi gate (strict-NLI under-score prose tổng hợp; không phải tín hiệu chất lượng).
+## Gate đang sống (giá trị → `CLAUDE.md §5` → grep code)
+- **Cứng:** P0a domain-evidence (PRE-writer) · **G2** cite_precision ≥0.45 · **G4** topic ≥0.50 · StageD word-count/cross-ref · empty-pool.
+- **Advisory:** **G3** grounding (HHEM) log-only · `explain.py` explanation_depth.
 - P0c seen-penalty fire thật; canonical + pool-rescued **EXEMPT**.
 
-## Đã có trong base (merged main)
-Outline **anti-matrix ENFORCED** (`enforce_outline_structure` chạy mọi path) · embed unify bge-m3 · anchoring safe (không thu nhỏ pool) · **G2 fail-CLOSED** · evidence-pool rescue (mượn sibling, P0c-exempt) · claim-aware excerpt (`_best_passage`) · Stage-F `decite` + `mathfix` single-source · `.env` auto-load · brave provider · ReAct re-dispatch trước khi stub BLOCKED · render tectonic robust.
+## ⛔ ĐÃ THỬ VÀ THẤT BẠI — đừng làm lại nếu không có bằng chứng mới
+Ba lần liên tiếp nhắm vào "hình phạt dành cho tổng hợp", **không lần nào gỡ được**. Chi tiết + số → khối `TRIED AND REVERTED` trong `deep_investigate.py`.
+1. **CitationAgent** (gắn lại `[N]` sau khi viết, prose bất biến): 95 lần gọi, ΔG2 **+0.028** (20 tốt/14 tệ) = nhiễu. Code đã xoá.
+2. **G2 chấm theo CLAIM** (hợp các nguồn được trích + miễn câu suy diễn): chấm lại 66 section thật → **0.352 → 0.323**, ít hơn 3 section qua gate. **Siết chứ không nới.** `verify.py` đã revert nguyên trạng.
+3. Suy ra: hình phạt tổng hợp có vẻ **nội tại** ở việc chấm prose tổng hợp với excerpt truy xuất — **không phải** lỗi của đơn vị chấm.
 
-## Trần chất lượng & hướng đi
-- **Retrieval base là biến chi phối block-rate**, không phải code gate. Tavily billing-dead (402) → base free mỏng hơn → block nhiều hơn. Thêm `BRAVE_API_KEY` (free) là lever rẻ nhất; **ĐỪNG prune outline bằng keyword**.
-- **Residual = writer grounding:** phần lớn section ship `degraded` vì cite_precision dưới ngưỡng, không phải vì lệch topic.
-- **Lever kế (đúng doctrine, KHÔNG train): surgical verify-revise** — feed `cite_res["verdicts"]` per-`[N]` ngược writer làm retry-hint để sửa đúng citation hỏng. Thứ tự ưu tiên đầy đủ → `docs/plan.md`.
-- **DOCTRINE (bất biến):** cải thiện ở tầng orchestration/inference (retrieval · verify · revise-loop · prompt · evidence-select) — **KHÔNG train model, KHÔNG build dataset**. → `CLAUDE.md §2` + `§6.9`.
+## Đánh đổi đang bật (biết giá của nó)
+- `_CANONICAL_EXCERPT_WORDS = 2200` (đoạn liền mạch dày công thức cho canonical, thay cửa sổ 550 bám claim): `explanation_depth` **0.503→0.599**, `cite_precision` **0.385→0.345**. Sách dạy nhiều hơn, quy nguồn kém hơn. Section `degraded` **vẫn vào sách** (chỉ `BLOCKED` bị bỏ). Về `550` là khôi phục y cũ.
+- **Mọi thứ đụng G2 đều là đánh đổi, không có cái nào miễn phí.**
+
+## Đã có trong base (merged main)
+Outline **anti-matrix ENFORCED** · embed unify bge-m3 · **G2 fail-CLOSED** · evidence-pool rescue · MMR diversity (`select_diverse`) · Stage-F `decite`/`dedup`/`mathfix`/**`mdfix`** (list bẹp, `[[N]]`, ref renumber, orphan cite) · **`arxiv_by_id` có fallback** (timeout 25s + retry + Tavily-theo-ID) · **`notes.normalize_source_id`** single-source · ReAct re-dispatch · render tectonic robust · provenance + atomic state write.
+
+## Cảnh báo vận hành
+- **Tavily ĐANG SỐNG** (key mới, 2026-07). Ghi chép cũ nói "billing-dead 402" là **SAI**.
+- `export.arxiv.org` **chập chờn thật** (timeout 7s/20s, HTTP 429 ở 40s). Canonical mất → **không có lỗi nào được ném** vì canonical miễn prefilter+P0c. Kiểm bằng log `arxiv_by_id returned N papers`.
+- Canonical **không** được miễn `rerank.RELEVANCE_FLOOR = 0.25` — chúng vẫn có thể bị cắt sau prefilter. Chưa xác minh cắt oan hay cắt đúng.
+- **Đừng chạy `--target-section X` kèm `--no-smoke` trên run smoke**: resume sẽ sinh luôn mọi chương còn thiếu (16 → 86 section).
 
 ## Lệnh nhanh
 ```bash
-./run_full.sh                                # hoặc: python3 pipeline/deep_research_v3.py --topic "<T>" --out-name <n> --no-smoke
-python3 tools/monitor.py                     # tiến độ khi đang chạy
-python3 tools/report.py output/runs/<n>      # đếm quality ok/degraded/BLOCKED sau run
-python3 eval/test_verify_optim.py            # unit test verify (mỗi file test là script độc lập, KHÔNG pytest)
+python3 agentic.py doctor | run | verify | report <run>
+python3 eval/verify_all.py            # cổng ship, 17/17 (--static = vài giây, không cần Ollama)
+python3 tools/report.py output/runs/<n>
 ```
