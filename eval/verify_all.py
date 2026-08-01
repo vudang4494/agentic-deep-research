@@ -19,6 +19,7 @@ breaks one is caught here instead of three runs later:
   H. providers well-formed -- PROVIDERS_DEFAULT holds only known provider names
   I. Ollama single-source  -- the endpoint literal lives only in research/_ollama.py
   J. config scope          -- every config constant is read by v3, or tagged [LEGACY-ONLY]
+  K. embed batched         -- /api/embed in one module, chunked under Ollama's item ceiling
 """
 import argparse
 import ast
@@ -307,6 +308,36 @@ def check_ollama_single_source():
            f"endpoint only in {OLLAMA_MODULE}; all callers import OLLAMA_BASE")
 
 
+# --------------------------------------- K. embed single-source + batched
+def check_embed_batched():
+    """`/api/embed` lives in ONE module, and that module chunks its batches.
+
+    Ollama rejects an embed request by ITEM COUNT (measured against bge-m3: 128 items ok,
+    192 fail; payload size is irrelevant -- 586 KB in 20 items succeeds). `embed()` returns []
+    on failure and every caller reads [] as "embeddings unavailable, degrade gracefully", so an
+    over-sized batch does not raise -- it silently switches off whatever the embedding was FOR.
+    A live 35-chapter outline lost its entire cross-chapter near-duplicate pass this way, and
+    because batch size scales with BOOK size the protection vanished exactly when it mattered.
+    That failure is invisible unless you already know to look for it -- hence a static check.
+    """
+    mod = ROOT / "research" / "embeddings.py"
+    if not mod.exists():
+        warn("K. embed batched", "research/embeddings.py missing -- skipped")
+        return
+    offenders = [rel(p) for p in py_files()
+                 if p.resolve() != mod.resolve()
+                 and "api/embed" in strip_comments_and_strings(source_of(p))]
+    m = re.search(r"^_MAX_BATCH\s*=\s*(\d+)", source_of(mod), re.M)
+    if offenders:
+        fail("K. embed batched", f"/api/embed called outside embeddings.py: {', '.join(offenders[:3])}")
+    elif not m:
+        fail("K. embed batched", "embeddings.py has no _MAX_BATCH -- batches are unbounded")
+    elif int(m.group(1)) > 128:
+        fail("K. embed batched", f"_MAX_BATCH={m.group(1)} exceeds the measured 128-item ceiling")
+    else:
+        ok("K. embed batched", f"single-source, _MAX_BATCH={m.group(1)} (measured ceiling 128)")
+
+
 # ------------------------------------------------ J. config constants are honest
 def check_config_scope():
     """Every constant in config.py must either be READ by the v3 layer (research/ + pipeline/)
@@ -381,7 +412,7 @@ def main():
 
     for fn in (check_imports, check_local_only, check_verifier_not_writer,
                check_embed_unified, check_constant_drift, check_model_literals,
-               check_normalizer_single_source, check_providers,
+               check_normalizer_single_source, check_providers, check_embed_batched,
                check_ollama_single_source, check_config_scope):
         try:
             fn()

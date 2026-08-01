@@ -48,7 +48,7 @@ Prompt thô → Discovery (TopicProfile) → Outline (từ evidence)
 | 3 | Assemble | `deep_research_v3.py` | book.md + math/heading hygiene (Stage F) + **`mdfix.normalize_markdown`** (structural: list/`[[N]]`/orphan-cite/ref-numbering) + **`decite.clean_intrabook_citations`** (trong `_sanitize_section_content`): gỡ name-drop nội-sách (writer trích TITLE section anh em như thể paper ngoài), CHỈ xoá khi khớp đúng một section title — `[N]`/cite ngoài được GIỮ + **`dedup.drop_duplicate_sentences`** (Stage-F, deletion-only): bỏ câu boilerplate lặp y hệt xuyên chương, GIỮ lần đầu; byte-conservative (paragraph không dup = nguyên si), bảo vệ code/math/heading/reference. `state.json` ghi **`provenance`** (git SHA + seed=42 + model digest) cho reproducibility |
 | 4 | Render `--render` | `scripts/render_book.py` | book.pdf / book.html |
 
-Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), `embeddings.py`, `fetch.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`explain.py`** (tín hiệu explanatory-depth — **ADVISORY, KHÔNG gate**: đo section có *dạy* hay chỉ *khẳng định*; deterministic, không model. Đo trước–calibrate–rồi mới bàn tới gate), **`dedup.py`** (Stage-F exact-duplicate sentence remover, deletion-only — single source; test `eval/test_dedup_sentences.py`), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift), **`mdfix.py`** (Stage-F markdown *structural* hygiene: list dính paragraph → chèn dòng trắng (thiếu nó pandoc bẹp cả list thành văn xuôi), `[[N]]`→`[N]`, `[N]` lạc sau `$$` → gắn lại vào câu prose, ref block `1./3.` → `- [1]/- [3]` (markdown ORDERED list tự đánh số lại → in ra "2." trong khi prose trích `[3]` = **vỡ attribution**). Formatting-only + **idempotent** → assembler và `render_book.py` cùng gọi, sách cũ được sửa lúc render; test `eval/test_mdfix.py`).
+Module phụ trợ (load-bearing): `config.py` (hằng số + `PROVIDERS_DEFAULT`), **`_ollama.py`** (single-source Ollama transport: `OLLAMA_BASE` + `chat()` — mọi module talk-to-Ollama import từ đây, ĐỪNG hardcode lại `localhost:11434`; enforce bởi `verify_all.py` check I), `canonical_seeds.py` (P0b seeds), **`embeddings.py`** (single-source `/api/embed`; **PHẢI chia batch** — Ollama từ chối theo SỐ LƯỢNG text, không theo dung lượng: đo được 128 ok / 192 fail, trong khi 586 KB trong 20 text thì OK. `embed()` trả `[]` khi lỗi và MỌI caller hiểu `[]` là "degrade cho êm" → vượt trần **không ném lỗi, chỉ âm thầm tắt thứ mà embedding phục vụ**. Enforce bởi `verify_all` check K), `fetch.py`, `types.py`, **`decite.py`** (Stage-F citation cleaner), **`explain.py`** (tín hiệu explanatory-depth — **ADVISORY, KHÔNG gate**: đo section có *dạy* hay chỉ *khẳng định*; deterministic, không model. Đo trước–calibrate–rồi mới bàn tới gate), **`dedup.py`** (Stage-F exact-duplicate sentence remover, deletion-only — single source; test `eval/test_dedup_sentences.py`), **`mathfix.py`** (single-source math/special-char normalization — ĐỪNG tạo bản copy cục bộ, nó sẽ drift), **`mdfix.py`** (Stage-F markdown *structural* hygiene: list dính paragraph → chèn dòng trắng (thiếu nó pandoc bẹp cả list thành văn xuôi), `[[N]]`→`[N]`, `[N]` lạc sau `$$` → gắn lại vào câu prose, ref block `1./3.` → `- [1]/- [3]` (markdown ORDERED list tự đánh số lại → in ra "2." trong khi prose trích `[3]` = **vỡ attribution**). Formatting-only + **idempotent** → assembler và `render_book.py` cùng gọi, sách cũ được sửa lúc render; test `eval/test_mdfix.py`).
 
 **Hai hành vi orchestrator dễ hiểu nhầm khi đọc log/state:**
 - **ReAct re-dispatch** (`deep_research_v3.py`, grep `ReAct re-dispatch`): section ném `RuntimeError` (P0a/StageE block) được **retry MỘT lần** với `max_rounds+2` + union provider set *trước khi* stub `[BLOCKED]`. → block-rate trong `state.json` là số **sau** retry; và đây là lý do một section chạy hai lượt.
@@ -127,7 +127,13 @@ python3 pipeline/deep_research_v3.py --topic "RLHF" --out-name rlhf_v4 \
   --canonical-arxiv-ids "2203.02155,2305.18290,1706.03762" --no-smoke
 # ⚠️ SMOKE LÀ MẶC ĐỊNH (`smoke = not args.no_smoke`) và smoke cắt `chapters[:2]`.
 #    Quên `--no-smoke` → book 2 chương; đó KHÔNG phải bug.
-#    Flag: --no-smoke · --max-rounds · --providers · --n-chapters / --sections-per-chapter (hint outline) · --render
+#    Flag: --no-smoke · --max-rounds · --providers · --n-chapters / --sections-per-chapter · --render
+# ⚠️ --n-chapters là HINT, KHÔNG phải lệnh — outline emerge từ evidence (doctrine §2). Đo thật:
+#    xin 60x10=600 → nhận 39 chương/334 section, và 8 chương bị lấp bằng khuôn aspect-matrix
+#    ("<tên chương>: Core Mechanisms / Design and Trade-offs / Practical Methods") vì chỉ có ~49 nguồn.
+#    enforce_outline_structure đã thu gọn 56 section matrix — nó chặn phần lớn, KHÔNG chặn hết.
+#    → Muốn sách DÀI hơn thì mở rộng NGUỒN ở Discovery, đừng tăng --n-chapters: ép chương lên
+#      evidence mỏng chỉ đẻ ra khuôn mẫu. Quy đổi đo được: ~1 section ≈ 2 trang, ~3,3 phút/section.
 TOPIC="RLHF" OUT_NAME="rlhf_v5" CANONICAL_IDS="2203.02155" ./run_full.sh   # env-driven launcher
 
 # ⛔ GATE TRƯỚC KHI SHIP — chạy cái này, không chỉ test lẻ:
@@ -161,7 +167,15 @@ pkill -f pipeline/deep_research_v3.py    # dừng
 ```
 
 **Cách đọc block-rate (quan trọng — đừng "sửa gate" nhầm):**
-- **Block-rate là hàm của RETRIEVAL BASE, không phải của code gate.** Base free (arxiv/wiki/ddg) làm block-rate cao hơn hẳn base có tavily/brave. Số trong README được đo khi retrieval base khác → **không so trực tiếp với run hôm nay**; muốn biết số thật thì chạy `tools/report.py` trên chính run đó.
+- **Block-rate là hàm của RETRIEVAL BASE, không phải của code gate** — đo trên 3 run thật:
+
+| run | n | block | topic G4 | cite_prec | expl |
+|---|---|---|---|---|---|
+| `rlhf_baseline_v1` | 16 | 6,2% | 0,852 | 0,385 | 0,503 |
+| `rlhf_deriv_v1` | 86 | **23,3%** | 0,715 | 0,352 | 0,580 |
+| `gen_ai_900p` | 334 | **1,5%** | 0,902 | 0,356 | 0,631 |
+
+  → block-rate và topic **dao động mạnh** theo chất lượng retrieval (1,5–23,3%), còn **`cite_precision` gần như BẤT ĐỘNG** (0,352–0,385) bất kể chủ đề, quy mô hay retrieval. Đó là bằng chứng định lượng cho kết luận *hình phạt tổng hợp là nội tại* — nó không nhúc nhích theo bất cứ đòn bẩy nào đã thử.
 - Section bị block = gate từ chối bịa → **hành vi ĐÚNG**, không phải regression. Muốn hạ block-rate → **thêm `BRAVE_API_KEY`** (free), **ĐỪNG prune outline bằng keyword** (đã test trên label thật: precision chỉ ~59% → over-prune section tốt).
 - **Nhãn `quality` KHÔNG so sánh được xuyên phiên bản gate.** Run cũ (trước khi G2 chạy thật) có `ok` theo nghĩa khác. Luôn kèm ngày + trạng thái gate khi trích số.
 
